@@ -20,6 +20,13 @@
 #' @param competitiveness_param Threshold for eliminating underperforming models (default 0.2)
 #' @param tolerance Optimization convergence tolerance (default 0.01)
 #' @param verbose Print progress messages (default TRUE)
+#' @param checkpoint_file Optional file path to save checkpoints after each iteration.
+#'   Allows resuming if the process is interrupted.
+#' @param resume_from Optional. Either a file path to a checkpoint or an aps_result
+#'   object to resume from. When resuming, iterations continue from where they left off.
+#' @param use_genetic Logical. If TRUE, use genetic algorithm-style mutations to
+#'   generate new architectures from well-performing parents. If FALSE (default),
+#'   use purely random architecture generation.
 #'
 #' @return A list with class "aps_result" containing:
 #'   \item{x}{Matrix of all evaluated parameter values}
@@ -61,7 +68,10 @@ aps <- function(obj_function,
                 exploit_ratio = 0.5,
                 competitiveness_param = 0.2,
                 tolerance = 0.01,
-                verbose = TRUE) {
+                verbose = TRUE,
+                checkpoint_file = NULL,
+                resume_from = NULL,
+                use_genetic = FALSE) {
 
   # Handle bounds
   if (length(x_min) == 1) x_min <- rep(x_min, n_params)
@@ -70,30 +80,79 @@ aps <- function(obj_function,
   # Initialize storage
   architecture_history <- NULL
   iteration_tracker <- NULL
+  start_iter <- 1
 
-  # Generate initial data if not provided
-  if (is.null(x_init) || is.null(y_init)) {
-    if (verbose) message("Generating initial random sample...")
 
-    x_train <- matrix(nrow = n_obs, ncol = n_params)
-    for (j in 1:n_params) {
-      x_train[, j] <- runif(n_obs, x_min[j], x_max[j])
+  # Handle resume from checkpoint
+  if (!is.null(resume_from)) {
+    # Load checkpoint if it's a file path
+    if (is.character(resume_from)) {
+      if (verbose) message(sprintf("Loading checkpoint from %s...", resume_from))
+      checkpoint <- readRDS(resume_from)
+    } else if (inherits(resume_from, "aps_result")) {
+      checkpoint <- resume_from
+    } else {
+      stop("resume_from must be a file path or an aps_result object")
     }
 
-    y_train <- evaluate_objective(obj_function, x_train, num_cores)
-    iteration_tracker <- rep(0, n_obs)  # Iteration 0 = initialization
+    # Restore state
+    x_train <- checkpoint$x
+    y_train <- checkpoint$y
+    iteration_tracker <- checkpoint$iteration
+    architecture_history <- checkpoint$architecture_df
+    start_iter <- max(iteration_tracker) + 1
+
+    # Restore current architecture state (the "keep" models from last iteration)
+    last_iter_arch <- architecture_history[architecture_history$iteration == max(architecture_history$iteration), ]
+    architecture_df <- last_iter_arch[last_iter_arch$keep, c("depth", "width", "reg", "dropout", "activation")]
+    n_bad_models <- n_models - nrow(architecture_df)
+
+    # Fill in with new architectures if needed
+    if (n_bad_models > 0) {
+      if (use_genetic && nrow(architecture_df) > 0) {
+        architecture_df <- rbind(architecture_df, mutate_architectures(architecture_df, n_bad_models))
+      } else {
+        architecture_df <- rbind(architecture_df, generate_architectures(n_bad_models))
+      }
+    }
+
+    if (verbose) {
+      message(sprintf("Resumed from iteration %d", start_iter - 1))
+      message(sprintf("Existing data: %d points", nrow(x_train)))
+      message(sprintf("Continuing to iteration %d", n_iter))
+    }
+
+    # Check if already done
+    if (start_iter > n_iter) {
+      if (verbose) message("Already completed requested iterations. Returning existing result.")
+      return(checkpoint)
+    }
+
   } else {
-    x_train <- x_init
-    y_train <- y_init
-    iteration_tracker <- rep(0, nrow(x_init))
+    # Generate initial data if not provided
+    if (is.null(x_init) || is.null(y_init)) {
+      if (verbose) message("Generating initial random sample...")
+
+      x_train <- matrix(nrow = n_obs, ncol = n_params)
+      for (j in 1:n_params) {
+        x_train[, j] <- runif(n_obs, x_min[j], x_max[j])
+      }
+
+      y_train <- evaluate_objective(obj_function, x_train, num_cores)
+      iteration_tracker <- rep(0, n_obs)  # Iteration 0 = initialization
+    } else {
+      x_train <- x_init
+      y_train <- y_init
+      iteration_tracker <- rep(0, nrow(x_init))
+    }
+
+    # Initialize architecture
+    architecture_df <- generate_architectures(n_models)
+    n_bad_models <- n_models  # All models are "new" initially
   }
 
-  # Initialize architecture
-  architecture_df <- generate_architectures(n_models)
-  n_bad_models <- n_models  # All models are "new" initially
-
   # Main optimization loop
-  for (i in 1:n_iter) {
+  for (i in start_iter:n_iter) {
     n_good_models <- n_models - n_bad_models
 
     if (verbose) {
@@ -175,12 +234,40 @@ aps <- function(obj_function,
                                            c("depth", "width", "reg", "dropout", "activation")]
 
     if (n_bad_models > 0) {
-      new_architecture_df <- rbind(
-        new_architecture_df,
-        generate_architectures(n_bad_models)
-      )
+      if (use_genetic && nrow(new_architecture_df) > 0) {
+        # Mutate from good parents
+        new_architecture_df <- rbind(
+          new_architecture_df,
+          mutate_architectures(new_architecture_df, n_bad_models)
+        )
+      } else {
+        # Pure random generation
+        new_architecture_df <- rbind(
+          new_architecture_df,
+          generate_architectures(n_bad_models)
+        )
+      }
     }
     architecture_df <- new_architecture_df
+
+    # Save checkpoint if requested
+    if (!is.null(checkpoint_file)) {
+      best_idx_tmp <- which.min(y_train)
+      checkpoint_result <- list(
+        x = x_train,
+        y = y_train,
+        architecture_df = architecture_history,
+        best_x = x_train[best_idx_tmp, ],
+        best_y = y_train[best_idx_tmp],
+        iteration = iteration_tracker,
+        n_iter = n_iter,
+        n_obs = n_obs,
+        exploit_ratio = exploit_ratio
+      )
+      class(checkpoint_result) <- "aps_result"
+      saveRDS(checkpoint_result, file = checkpoint_file)
+      if (verbose) message(sprintf("Checkpoint saved to %s", checkpoint_file))
+    }
   }
 
   # Find best (most adversarial) point
