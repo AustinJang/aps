@@ -17,7 +17,7 @@ plot(x, type = "performance", ...)
 
 - type:
 
-  Type of plot: "performance" (default) or "correlation"
+  Type of plot: "performance" (default), "correlation", or "distance"
 
 - ...:
 

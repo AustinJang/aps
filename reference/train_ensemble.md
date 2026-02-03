@@ -1,11 +1,19 @@
 # Train Deep Ensemble
 
 Trains an ensemble of neural networks with varying architectures.
+Supports parallel training across multiple CPU cores.
 
 ## Usage
 
 ``` r
-train_ensemble(x_train, y_train, architecture_df, verbose = TRUE, ...)
+train_ensemble(
+  x_train,
+  y_train,
+  architecture_df,
+  num_cores = 1,
+  verbose = TRUE,
+  ...
+)
 ```
 
 ## Arguments
@@ -21,6 +29,10 @@ train_ensemble(x_train, y_train, architecture_df, verbose = TRUE, ...)
 - architecture_df:
 
   Data frame specifying architectures
+
+- num_cores:
+
+  Number of CPU cores for parallel training (default 1 = sequential)
 
 - verbose:
 

@@ -20,7 +20,7 @@
 
     <a class="navbar-brand me-2" href="../index.html">aps</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.0.0.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -125,12 +125,12 @@ question without re-running:</p>
 <span><span class="va">result</span><span class="op">$</span><span class="va">best_x</span></span>
 <span></span>
 <span><span class="co"># New question: where is coverage lowest?</span></span>
-<span><span class="va">result_coverage</span> <span class="op">&lt;-</span> <span class="fu">rereduce</span><span class="op">(</span><span class="va">result</span>, <span class="kw">function</span><span class="op">(</span><span class="va">v</span><span class="op">)</span> <span class="va">v</span><span class="op">[</span><span class="st">"coverage"</span><span class="op">]</span><span class="op">)</span></span>
+<span><span class="va">result_coverage</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/rereduce.html">rereduce</a></span><span class="op">(</span><span class="va">result</span>, <span class="kw">function</span><span class="op">(</span><span class="va">v</span><span class="op">)</span> <span class="va">v</span><span class="op">[</span><span class="st">"coverage"</span><span class="op">]</span><span class="op">)</span></span>
 <span><span class="va">result_coverage</span><span class="op">$</span><span class="va">best_y</span></span>
 <span><span class="va">result_coverage</span><span class="op">$</span><span class="va">best_x</span></span>
 <span></span>
 <span><span class="co"># Another question: where does mean beat median?</span></span>
-<span><span class="va">result_gap</span> <span class="op">&lt;-</span> <span class="fu">rereduce</span><span class="op">(</span><span class="va">result</span>, <span class="kw">function</span><span class="op">(</span><span class="va">v</span><span class="op">)</span> <span class="op">{</span></span>
+<span><span class="va">result_gap</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/rereduce.html">rereduce</a></span><span class="op">(</span><span class="va">result</span>, <span class="kw">function</span><span class="op">(</span><span class="va">v</span><span class="op">)</span> <span class="op">{</span></span>
 <span>  <span class="fu"><a href="https://rdrr.io/r/base/MathFun.html" class="external-link">abs</a></span><span class="op">(</span><span class="va">v</span><span class="op">[</span><span class="st">"bias_mean"</span><span class="op">]</span><span class="op">)</span> <span class="op">-</span> <span class="fu"><a href="https://rdrr.io/r/base/MathFun.html" class="external-link">abs</a></span><span class="op">(</span><span class="va">v</span><span class="op">[</span><span class="st">"bias_median"</span><span class="op">]</span><span class="op">)</span>  <span class="co"># Positive = mean worse</span></span>
 <span><span class="op">}</span><span class="op">)</span></span>
 <span><span class="va">result_gap</span><span class="op">$</span><span class="va">best_y</span></span>
@@ -182,10 +182,10 @@ trajectories.</p>
 <span><span class="op">)</span></span>
 <span></span>
 <span><span class="co"># Post-hoc: where does TWFE specifically fail?</span></span>
-<span><span class="va">result_twfe</span> <span class="op">&lt;-</span> <span class="fu">rereduce</span><span class="op">(</span><span class="va">result</span>, <span class="kw">function</span><span class="op">(</span><span class="va">v</span><span class="op">)</span> <span class="op">-</span><span class="va">v</span><span class="op">[</span><span class="st">"twfe_rmse"</span><span class="op">]</span><span class="op">)</span></span>
+<span><span class="va">result_twfe</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/rereduce.html">rereduce</a></span><span class="op">(</span><span class="va">result</span>, <span class="kw">function</span><span class="op">(</span><span class="va">v</span><span class="op">)</span> <span class="op">-</span><span class="va">v</span><span class="op">[</span><span class="st">"twfe_rmse"</span><span class="op">]</span><span class="op">)</span></span>
 <span></span>
 <span><span class="co"># Where is the gap between TWFE and ASCM largest?</span></span>
-<span><span class="va">result_gap</span> <span class="op">&lt;-</span> <span class="fu">rereduce</span><span class="op">(</span><span class="va">result</span>, <span class="kw">function</span><span class="op">(</span><span class="va">v</span><span class="op">)</span> <span class="op">{</span></span>
+<span><span class="va">result_gap</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/rereduce.html">rereduce</a></span><span class="op">(</span><span class="va">result</span>, <span class="kw">function</span><span class="op">(</span><span class="va">v</span><span class="op">)</span> <span class="op">{</span></span>
 <span>  <span class="va">v</span><span class="op">[</span><span class="st">"twfe_rmse"</span><span class="op">]</span> <span class="op">-</span> <span class="va">v</span><span class="op">[</span><span class="st">"ascm_rmse"</span><span class="op">]</span>  <span class="co"># Positive = TWFE worse</span></span>
 <span><span class="op">}</span><span class="op">)</span></span></code></pre></div>
 </div>
