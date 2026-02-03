@@ -11,6 +11,7 @@ propose_candidates(
   x_min,
   x_max,
   n_candidates,
+  exploit_ratio = 0.5,
   n_starting = 20,
   tolerance = 0.01
 )
@@ -28,6 +29,8 @@ propose_candidates(
 
 \item{n_candidates}{Number of candidate points to propose}
 
+\item{exploit_ratio}{Fraction of candidates for exploitation vs exploration (default 0.5)}
+
 \item{n_starting}{Number of random starting points for optimization}
 
 \item{tolerance}{Optimization tolerance}
@@ -36,7 +39,7 @@ propose_candidates(
 Matrix of proposed candidate points
 }
 \description{
-Implements the epsilon-LCB acquisition strategy: half exploitation
-(minimize predicted value) and half exploration (maximize uncertainty).
+Implements the epsilon-LCB acquisition strategy: exploitation
+(minimize predicted value) and exploration (maximize uncertainty).
 }
 \keyword{internal}

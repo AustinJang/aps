@@ -4,7 +4,14 @@
 \alias{train_ensemble}
 \title{Train Deep Ensemble}
 \usage{
-train_ensemble(x_train, y_train, architecture_df, verbose = TRUE, ...)
+train_ensemble(
+  x_train,
+  y_train,
+  architecture_df,
+  num_cores = 1,
+  verbose = TRUE,
+  ...
+)
 }
 \arguments{
 \item{x_train}{Training features (matrix)}
@@ -12,6 +19,8 @@ train_ensemble(x_train, y_train, architecture_df, verbose = TRUE, ...)
 \item{y_train}{Training targets (vector)}
 
 \item{architecture_df}{Data frame specifying architectures}
+
+\item{num_cores}{Number of CPU cores for parallel training (default 1 = sequential)}
 
 \item{verbose}{Print progress}
 
@@ -22,5 +31,6 @@ List of trained networks
 }
 \description{
 Trains an ensemble of neural networks with varying architectures.
+Supports parallel training across multiple CPU cores.
 }
 \keyword{internal}

@@ -4,7 +4,15 @@
 \alias{evaluate_objective}
 \title{Evaluate Objective Function}
 \usage{
-evaluate_objective(obj_function, x, num_cores = 1)
+evaluate_objective(
+  obj_function,
+  x,
+  num_cores = 1,
+  reduction = NULL,
+  output_names = NULL,
+  verbose = FALSE,
+  progress_prefix = NULL
+)
 }
 \arguments{
 \item{obj_function}{The objective function}
@@ -12,11 +20,23 @@ evaluate_objective(obj_function, x, num_cores = 1)
 \item{x}{Matrix of parameter values}
 
 \item{num_cores}{Number of cores}
+
+\item{reduction}{Optional reduction function for vector outputs}
+
+\item{output_names}{Optional names for output components}
+
+\item{verbose}{Print progress (default FALSE)}
+
+\item{progress_prefix}{Optional prefix for progress messages (e.g., "Initial sample")}
 }
 \value{
-Vector of performance statistics
+List with:
+\item{y}{Vector of (reduced) scalar performance statistics}
+\item{y_raw}{Matrix of raw outputs (NULL if obj_function returns scalars)}
+\item{output_names}{Names of output components (NULL if scalar)}
 }
 \description{
 Helper function to evaluate the objective function, optionally in parallel.
+Handles both scalar and vector-valued objective functions.
 }
 \keyword{internal}

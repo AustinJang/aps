@@ -9,7 +9,7 @@
 \arguments{
 \item{x}{An aps_result object}
 
-\item{type}{Type of plot: "performance" (default) or "correlation"}
+\item{type}{Type of plot: "performance" (default), "correlation", or "distance"}
 
 \item{...}{Additional arguments passed to specific plot functions}
 }

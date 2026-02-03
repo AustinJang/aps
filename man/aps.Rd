@@ -14,15 +14,32 @@ aps(
   n_models = 5,
   x_init = NULL,
   y_init = NULL,
+  y_raw_init = NULL,
   num_cores = 1,
+  exploit_ratio = 0.5,
   competitiveness_param = 0.2,
   tolerance = 0.01,
-  verbose = TRUE
+  verbose = TRUE,
+  checkpoint_file = NULL,
+  resume_from = NULL,
+  use_genetic = FALSE,
+  reduction = NULL,
+  output_names = NULL,
+  architecture_config = NULL,
+  early_stop = FALSE,
+  rho_tilde_threshold = 0.95,
+  min_stable_iters = 2,
+  invalid_penalty = NULL
 )
 }
 \arguments{
-\item{obj_function}{Function that takes a parameter vector and returns a scalar
-performance statistic. Lower values indicate worse performance (adversarial).}
+\item{obj_function}{Function that takes a parameter vector and returns either:
+\itemize{
+\item A scalar performance statistic (classic usage), or
+\item A named numeric vector of intermediate outputs (vector mode).
+}
+In vector mode, a \code{reduction} function must be provided to map the
+output vector to a scalar. Lower values indicate worse performance.}
 
 \item{n_params}{Number of parameters in the search space}
 
@@ -38,24 +55,89 @@ performance statistic. Lower values indicate worse performance (adversarial).}
 
 \item{x_init}{Optional matrix of initial parameter values}
 
-\item{y_init}{Optional vector of initial performance statistics}
+\item{y_init}{Optional vector of initial reduced performance statistics.
+For vector mode, you can also pass \code{y_raw_init} instead.}
+
+\item{y_raw_init}{Optional matrix of initial raw objective outputs (vector
+mode only). One row per observation, one column per output component.
+If provided with a \code{reduction}, \code{y_init} is computed automatically.}
 
 \item{num_cores}{Number of cores for parallel evaluation (default 1)}
+
+\item{exploit_ratio}{Fraction of candidates for exploitation vs exploration (default 0.5)}
 
 \item{competitiveness_param}{Threshold for eliminating underperforming models (default 0.2)}
 
 \item{tolerance}{Optimization convergence tolerance (default 0.01)}
 
 \item{verbose}{Print progress messages (default TRUE)}
+
+\item{checkpoint_file}{Optional file path to save checkpoints after each iteration.
+Allows resuming if the process is interrupted.}
+
+\item{resume_from}{Optional. Either a file path to a checkpoint or an aps_result
+object to resume from. When resuming, iterations continue from where they left off.
+If the \code{reduction} function has changed since the previous run, the
+stored raw outputs (\code{y_raw}) are re-scalarized without re-running
+simulations. The surrogate is then retrained on the new scalar targets.}
+
+\item{use_genetic}{Logical. If TRUE, use genetic algorithm-style mutations to
+generate new architectures from well-performing parents. If FALSE (default),
+use purely random architecture generation.}
+
+\item{reduction}{Optional function that maps a named numeric vector (one row
+of objective output) to a scalar. Required when \code{obj_function} returns
+vectors. Can be changed on resume to re-scalarize existing data without
+re-running simulations.
+Examples: \code{function(v) -max(v)}, \code{function(v) v["bias_A"] - v["bias_B"]}.
+If NULL and \code{obj_function} returns a scalar, behaves identically to the
+original package (full backward compatibility).}
+
+\item{output_names}{Optional character vector naming the outputs of
+\code{obj_function}. If NULL, names are inferred from the first evaluation.
+Only relevant in vector mode.}
+
+\item{architecture_config}{Optional list specifying neural network architecture
+parameter ranges for the ensemble. If NULL, uses defaults. Supported keys:
+\itemize{
+\item \code{depth}: Integer vector of allowed depths (default: 1:5)
+\item \code{width}: Integer vector of allowed widths (default: c(32, 64, 128, 256, 512))
+\item \code{reg}: Numeric vector of allowed L2 regularization values (default: seq(0, 0.0005, 0.0001))
+\item \code{dropout}: Numeric vector of allowed dropout values (default: seq(0, 0.5, 0.1))
+\item \code{activation}: Character vector of allowed activations (default: c("relu", "sigmoid", "tanh"))
+}
+Example: \code{architecture_config = list(depth = 1:3, activation = c("relu", "tanh"))}}
+
+\item{early_stop}{Logical. If TRUE, stop early when the surrogate has learned
+all learnable signal (rho_tilde >= threshold) AND the minimum has been stable
+for \code{min_stable_iters} iterations. Default FALSE.}
+
+\item{rho_tilde_threshold}{Threshold for the reliability ratio (rho_out / rho*)
+above which the surrogate is considered to have learned all signal. Default 0.95.}
+
+\item{min_stable_iters}{Number of consecutive iterations without improvement in
+the minimum before early stopping is triggered. Default 2.}
+
+\item{invalid_penalty}{Optional penalty value for invalid y values (NA, NULL,
+Inf, NaN, non-numeric). When the reduction function returns an invalid value,
+APS assigns this penalty and tracks the index. If NULL (default), uses
+max(valid_y) + 2*sd(valid_y) to steer exploration away from crash regions.}
 }
 \value{
 A list with class "aps_result" containing:
 \item{x}{Matrix of all evaluated parameter values}
-\item{y}{Vector of all performance statistics}
+\item{y}{Vector of all (reduced) performance statistics}
+\item{y_raw}{Matrix of raw objective outputs (NULL in scalar mode).
+Rows = evaluations, columns = output components.}
 \item{architecture_df}{Data frame of model architectures and performance}
 \item{best_x}{Parameter values with lowest (worst) performance}
 \item{best_y}{Lowest performance statistic found}
 \item{iteration}{Vector indicating which iteration each point was from}
+\item{reduction}{The reduction function used (NULL in scalar mode)}
+\item{output_names}{Names of the output vector components (NULL in scalar mode)}
+\item{invalid_idx}{Integer vector of indices where y was invalid and penalty applied}
+\item{stopped_early}{Logical indicating if early stopping was triggered}
+\item{final_iteration}{The last iteration completed (may be less than n_iter if stopped early)}
 }
 \description{
 Main function for adversarial parameter selection using Bayesian optimization
@@ -65,7 +147,7 @@ values likely to produce poor method performance.
 }
 \examples{
 \dontrun{
-# Simple example: find parameters where sin function is minimized
+# Scalar mode (classic, fully backward-compatible):
 obj_fn <- function(x) sin(x[1]) * cos(x[2])
 
 result <- aps(
@@ -77,7 +159,29 @@ result <- aps(
   n_obs = 100
 )
 
-print(result$best_x)
-print(result$best_y)
+# Vector mode: objective returns multiple metrics, reduce to scalar
+obj_fn_vec <- function(x) c(bias_A = x[1]^2, bias_B = (x[2]-1)^2)
+
+result <- aps(
+  obj_function = obj_fn_vec,
+  n_params = 2,
+  x_min = -2,
+  x_max = 2,
+  n_iter = 5,
+  n_obs = 100,
+  reduction = function(v) v["bias_A"] - v["bias_B"]
+)
+
+# Resume with a different reduction — no re-simulation needed:
+result2 <- aps(
+  obj_function = obj_fn_vec,
+  n_params = 2,
+  x_min = -2,
+  x_max = 2,
+  n_iter = 10,
+  n_obs = 100,
+  reduction = function(v) -v["bias_B"],
+  resume_from = result
+)
 }
 }

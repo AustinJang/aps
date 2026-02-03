@@ -4,15 +4,31 @@
 \alias{generate_architectures}
 \title{Generate Random Architecture}
 \usage{
-generate_architectures(n)
+generate_architectures(n, config = NULL)
 }
 \arguments{
 \item{n}{Number of architectures to generate}
+
+\item{config}{Optional list specifying architecture parameter ranges. If NULL,
+uses defaults. Supported keys:
+\itemize{
+\item \code{depth}: Integer vector of allowed depths (default: 1:5)
+\item \code{width}: Integer vector of allowed widths (default: c(32, 64, 128, 256, 512))
+\item \code{reg}: Numeric vector of allowed regularization values (default: seq(0, 0.0005, 0.0001))
+\item \code{dropout}: Numeric vector of allowed dropout values (default: seq(0, 0.5, 0.1))
+\item \code{activation}: Character vector of allowed activations (default: c("relu", "sigmoid", "tanh"))
+}}
 }
 \value{
 A data frame with architecture specifications
 }
 \description{
-Generates a random neural network architecture specification.
+Generates a random neural network architecture specification with uniform
+width across all hidden layers. This is a reasonable default for most use cases.
 }
-\keyword{internal}
+\details{
+For custom architectures (e.g., funnel/bottleneck shapes, per-layer activations),
+users can either: (1) provide their own architecture_df to aps(), or
+(2) modify this function to generate different architecture specifications.
+The required columns are: depth, width, reg, dropout, activation.
+}

@@ -1,6 +1,6 @@
 Package: aps
 Title: Adversarial Parameter Selection for Monte Carlo Simulations
-Version: 0.0.0.9000
+Version: 0.1.0
 Authors@R:
     person("Austin", "Jang", , "austin.jang@yale.edu", role = c("aut", "cre"))
 Description: Tools for adversarial parameter selection in Monte Carlo simulation
@@ -10,7 +10,7 @@ Description: Tools for adversarial parameter selection in Monte Carlo simulation
 License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.1
+RoxygenNote: 7.3.3
 Imports:
     torch,
     parallel,

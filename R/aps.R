@@ -66,6 +66,10 @@
 #'   above which the surrogate is considered to have learned all signal. Default 0.95.
 #' @param min_stable_iters Number of consecutive iterations without improvement in
 #'   the minimum before early stopping is triggered. Default 2.
+#' @param invalid_penalty Optional penalty value for invalid y values (NA, NULL,
+#'   Inf, NaN, non-numeric). When the reduction function returns an invalid value,
+#'   APS assigns this penalty and tracks the index. If NULL (default), uses
+#'   max(valid_y) + 2*sd(valid_y) to steer exploration away from crash regions.
 #'
 #' @return A list with class "aps_result" containing:
 #'   \item{x}{Matrix of all evaluated parameter values}
@@ -78,6 +82,7 @@
 #'   \item{iteration}{Vector indicating which iteration each point was from}
 #'   \item{reduction}{The reduction function used (NULL in scalar mode)}
 #'   \item{output_names}{Names of the output vector components (NULL in scalar mode)}
+#'   \item{invalid_idx}{Integer vector of indices where y was invalid and penalty applied}
 #'   \item{stopped_early}{Logical indicating if early stopping was triggered}
 #'   \item{final_iteration}{The last iteration completed (may be less than n_iter if stopped early)}
 #'
@@ -145,7 +150,13 @@ aps <- function(obj_function,
                 architecture_config = NULL,
                 early_stop = FALSE,
                 rho_tilde_threshold = 0.95,
-                min_stable_iters = 2) {
+                min_stable_iters = 2,
+                invalid_penalty = NULL) {
+
+  # Helper to check if a y value is valid (not NA, NULL, Inf, NaN, or non-numeric)
+  is_valid_y <- function(y) {
+    is.numeric(y) && length(y) == 1 && is.finite(y)
+  }
 
   # Handle bounds
   if (length(x_min) == 1) x_min <- rep(x_min, n_params)
@@ -155,12 +166,20 @@ aps <- function(obj_function,
   # vector_mode is set to TRUE once we confirm obj_function returns vectors
   vector_mode <- !is.null(reduction)
   y_raw_train <- NULL  # Will be a matrix in vector mode, NULL in scalar mode
+  invalid_idx <- integer(0)  # Track indices with invalid y values
 
   # Initialize storage
   architecture_history <- NULL
   iteration_tracker <- NULL
   start_iter <- 1
 
+
+  # Auto-resume from checkpoint_file if it exists and resume_from not specified
+
+  if (is.null(resume_from) && !is.null(checkpoint_file) && file.exists(checkpoint_file)) {
+    if (verbose) message(sprintf("Found existing checkpoint at %s, auto-resuming...", checkpoint_file))
+    resume_from <- checkpoint_file
+  }
 
   # Handle resume from checkpoint
   if (!is.null(resume_from)) {
@@ -208,6 +227,33 @@ aps <- function(obj_function,
       y_train <- checkpoint$y
     }
 
+    # Restore invalid_idx from checkpoint or recompute
+    if (!is.null(checkpoint$invalid_idx)) {
+      invalid_idx <- checkpoint$invalid_idx
+    } else {
+      # Recompute invalid indices (for old checkpoints without this field)
+      invalid_idx <- which(!sapply(y_train, is_valid_y))
+    }
+
+    # Handle invalid values (may have changed due to new reduction)
+    current_invalid <- which(!sapply(y_train, is_valid_y))
+    if (length(current_invalid) > 0) {
+      valid_y <- y_train[sapply(y_train, is_valid_y)]
+      if (length(valid_y) > 0) {
+        penalty <- if (!is.null(invalid_penalty)) {
+          invalid_penalty
+        } else {
+          max(valid_y) + 2 * sd(valid_y)
+        }
+        y_train[current_invalid] <- penalty
+      }
+      invalid_idx <- current_invalid
+      if (verbose) {
+        message(sprintf("Found %d invalid y values (assigned penalty: %.4f)",
+                        length(current_invalid), penalty))
+      }
+    }
+
     # Restore current architecture state (the "keep" models from last iteration)
     last_iter_arch <- architecture_history[architecture_history$iteration == max(architecture_history$iteration), ]
     architecture_df <- last_iter_arch[last_iter_arch$keep, c("depth", "width", "reg", "dropout", "activation")]
@@ -247,7 +293,9 @@ aps <- function(obj_function,
 
       eval_result <- evaluate_objective(obj_function, x_train, num_cores,
                                         reduction = reduction,
-                                        output_names = output_names)
+                                        output_names = output_names,
+                                        verbose = verbose,
+                                        progress_prefix = "Initial sample")
       y_train <- eval_result$y
       y_raw_train <- eval_result$y_raw
       seeds_train <- eval_result$seeds
@@ -282,6 +330,27 @@ aps <- function(obj_function,
     # Initialize architecture
     architecture_df <- generate_architectures(n_models, config = architecture_config)
     n_bad_models <- n_models  # All models are "new" initially
+
+    # Handle invalid values in initial y
+    current_invalid <- which(!sapply(y_train, is_valid_y))
+    if (length(current_invalid) > 0) {
+      valid_y <- y_train[sapply(y_train, is_valid_y)]
+      if (length(valid_y) > 0) {
+        penalty <- if (!is.null(invalid_penalty)) {
+          invalid_penalty
+        } else {
+          max(valid_y) + 2 * sd(valid_y)
+        }
+        y_train[current_invalid] <- penalty
+      } else {
+        stop("All initial y values are invalid. Cannot proceed.")
+      }
+      invalid_idx <- current_invalid
+      if (verbose) {
+        message(sprintf("Initial sample: %d/%d invalid y values (penalty: %.4f)",
+                        length(current_invalid), length(y_train), penalty))
+      }
+    }
   }
 
   # Early stopping tracking
@@ -297,7 +366,6 @@ aps <- function(obj_function,
       message(sprintf("\n========== ITERATION %d/%d ==========", i, n_iter))
       message(sprintf("Training data: %d points | Good models: %d",
                       nrow(x_train), n_good_models))
-      cat(sprintf("\r[%d/%d] Training ensemble...", i, n_iter))
     }
 
     # Train ensemble (always on reduced y)
@@ -309,7 +377,7 @@ aps <- function(obj_function,
     )
 
     # Propose new candidates
-    if (verbose) cat(sprintf("\r[%d/%d] Proposing candidates...    ", i, n_iter))
+    if (verbose) message("Proposing candidates...")
     new_x <- propose_candidates(
       model_list = model_list,
       x_train = x_train,
@@ -322,13 +390,35 @@ aps <- function(obj_function,
     )
 
     # Evaluate new candidates
-    if (verbose) cat(sprintf("\r[%d/%d] Evaluating %d candidates...", i, n_iter, n_obs))
     eval_result <- evaluate_objective(obj_function, new_x, num_cores,
                                       reduction = reduction,
-                                      output_names = output_names)
+                                      output_names = output_names,
+                                      verbose = verbose,
+                                      progress_prefix = sprintf("Iter %d/%d", i, n_iter))
     new_y <- eval_result$y
     new_y_raw <- eval_result$y_raw
     new_seeds <- eval_result$seeds
+
+    # Handle invalid values in new_y
+    new_invalid <- which(!sapply(new_y, is_valid_y))
+    n_new_invalid <- length(new_invalid)
+    if (n_new_invalid > 0) {
+      all_valid_y <- c(y_train, new_y)[sapply(c(y_train, new_y), is_valid_y)]
+      if (length(all_valid_y) > 0) {
+        penalty <- if (!is.null(invalid_penalty)) {
+          invalid_penalty
+        } else {
+          max(all_valid_y) + 2 * sd(all_valid_y)
+        }
+        new_y[new_invalid] <- penalty
+      }
+      # Track global indices (offset by existing data size)
+      invalid_idx <- c(invalid_idx, new_invalid + nrow(x_train))
+      if (verbose) {
+        cat(sprintf("\r[%d/%d] %d/%d invalid y values (penalty: %.4f)\n",
+                    i, n_iter, n_new_invalid, length(new_y), penalty))
+      }
+    }
 
     # Update architecture performance tracking
     architecture_df$cor_in <- NA
@@ -374,7 +464,8 @@ aps <- function(obj_function,
       message(sprintf("Models kept: %d, replaced: %d", n_models - n_bad_models, n_bad_models))
       message(sprintf("Best in-sample cor: %.3f, Best out-of-sample cor: %.3f",
                       best_cor_in, best_cor_out))
-      message(sprintf("Current minimum y: %.4f", min(y_train)))
+      # Show iteration mean (more stable than single minimum which can be noisy)
+      message(sprintf("Iteration mean y: %.4f (min: %.4f)", mean(new_y), min(new_y)))
     }
 
     # Update architecture for next iteration
@@ -414,7 +505,8 @@ aps <- function(obj_function,
         n_obs = n_obs,
         exploit_ratio = exploit_ratio,
         reduction = reduction,
-        output_names = output_names
+        output_names = output_names,
+        invalid_idx = invalid_idx
       )
       class(checkpoint_result) <- "aps_result"
       saveRDS(checkpoint_result, file = checkpoint_file)
@@ -491,6 +583,7 @@ aps <- function(obj_function,
     exploit_ratio = exploit_ratio,
     reduction = reduction,
     output_names = output_names,
+    invalid_idx = invalid_idx,
     stopped_early = stopped_early,
     final_iteration = max(iteration_tracker)
   )
@@ -510,6 +603,8 @@ aps <- function(obj_function,
 #' @param num_cores Number of cores
 #' @param reduction Optional reduction function for vector outputs
 #' @param output_names Optional names for output components
+#' @param verbose Print progress (default FALSE)
+#' @param progress_prefix Optional prefix for progress messages (e.g., "Initial sample")
 #'
 #' @return List with:
 #'   \item{y}{Vector of (reduced) scalar performance statistics}
@@ -517,18 +612,33 @@ aps <- function(obj_function,
 #'   \item{output_names}{Names of output components (NULL if scalar)}
 #' @keywords internal
 evaluate_objective <- function(obj_function, x, num_cores = 1,
-                               reduction = NULL, output_names = NULL) {
+                               reduction = NULL, output_names = NULL,
+                               verbose = FALSE, progress_prefix = NULL) {
   n <- nrow(x)
 
   # Generate one seed per evaluation for reproducibility
   seeds <- sample.int(.Machine$integer.max, n)
 
+  # Build progress prefix
+  prefix <- if (!is.null(progress_prefix)) progress_prefix else "Evaluating"
+
   # Evaluate all points, setting seed before each call
   if (num_cores == 1) {
-    raw_results <- lapply(1:n, function(i) {
+    raw_results <- vector("list", n)
+    for (i in 1:n) {
+      if (verbose) {
+        # Use fixed-width format to overwrite cleanly
+        cat(sprintf("\r[%d/%d] %s...                    ", i, n, prefix))
+        flush.console()
+      }
       set.seed(seeds[i])
-      obj_function(x[i, ])
-    })
+      raw_results[[i]] <- obj_function(x[i, ])
+    }
+    if (verbose) {
+      cat("\r")  # Return to start
+      cat(strrep(" ", 60))  # Clear line
+      cat("\r")  # Return to start for next output
+    }
   } else {
     raw_results <- parallel::mclapply(
       1:n,
@@ -587,12 +697,15 @@ evaluate_objective <- function(obj_function, x, num_cores = 1,
 #'
 #' @param result An aps_result object with non-NULL \code{y_raw}
 #' @param reduction A function mapping a named numeric vector to a scalar
+#' @param invalid_penalty Optional penalty value for invalid y values
+#'   (NA, NULL, Inf, NaN, non-numeric). If NULL (default), uses
+#'   max(valid_y) + 2*sd(valid_y).
 #'
 #' @return A modified aps_result with updated \code{y}, \code{best_x},
-#'   \code{best_y}, and \code{reduction}
+#'   \code{best_y}, \code{reduction}, and \code{invalid_idx}
 #'
 #' @export
-rereduce <- function(result, reduction) {
+rereduce <- function(result, reduction, invalid_penalty = NULL) {
   if (!inherits(result, "aps_result")) {
     stop("result must be an aps_result object")
   }
@@ -601,8 +714,30 @@ rereduce <- function(result, reduction) {
          "The original run used scalar mode.")
   }
 
+  # Helper to check if a y value is valid
+  is_valid_y <- function(y) {
+    is.numeric(y) && length(y) == 1 && is.finite(y)
+  }
+
   result$y <- apply(result$y_raw, 1, reduction)
   result$reduction <- reduction
+
+  # Handle invalid values
+  invalid_idx <- which(!sapply(result$y, is_valid_y))
+  if (length(invalid_idx) > 0) {
+    valid_y <- result$y[sapply(result$y, is_valid_y)]
+    if (length(valid_y) > 0) {
+      penalty <- if (!is.null(invalid_penalty)) {
+        invalid_penalty
+      } else {
+        max(valid_y) + 2 * sd(valid_y)
+      }
+      result$y[invalid_idx] <- penalty
+    } else {
+      stop("All y values are invalid after rereduce. Cannot proceed.")
+    }
+  }
+  result$invalid_idx <- invalid_idx
 
   best_idx <- which.min(result$y)
   result$best_x <- result$x[best_idx, ]
