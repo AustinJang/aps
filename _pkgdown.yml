@@ -1,0 +1,12 @@
+url: https://austinjang.github.io/aps/
+template:
+  bootstrap: 5
+
+navbar:
+  structure:
+    left: [intro, reference, articles]
+    right: [search, github]
+  components:
+    github:
+      icon: fab fa-github
+      href: https://github.com/AustinJang/aps
