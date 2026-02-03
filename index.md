@@ -68,3 +68,8 @@ plot(result, type = "correlation")
 If you use this package, please cite:
 
     Jang, A. (2025). Adversarial Parameter Selection for Monte Carlo Simulations.
+
+------------------------------------------------------------------------
+
+*This package was developed with the assistance of [Claude
+Code](https://claude.ai/claude-code). All remaining errors are my own.*
