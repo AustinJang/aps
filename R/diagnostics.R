@@ -351,16 +351,18 @@ plot_correlation <- function(x, competitiveness = 0.2, show_rho_star = TRUE, k =
 
 #' Plot Exploitation Point Distance Tracking
 #'
-#' Visualizes how the predicted minimum location changes across iterations.
-#' Shows both the cumulative distance traveled and per-iteration metrics.
+#' Visualizes cumulative distance traveled by exploitation points across the
+#' optimization. Each exploitation point is shown on the x-axis, with the
+#' y-axis showing cumulative distance from the starting point.
 #'
 #' This diagnostic complements rho_tilde by showing WHERE the surrogate thinks
 #' the minimum is, not just how well it predicts. Key patterns:
 #' \itemize{
-#'   \item Large jumps between iterations: surrogate learning, changing its mind
-#'   \item Flat cumulative curve: converged, surrogate confident about location
-#'   \item High within-iteration spread: models disagree about minimum location
-#'   \item Low within-iteration spread: models agree on minimum location
+#'   \item Steep slope: surrogate moving through parameter space (learning)
+#'   \item Flat regions: surrogate staying in same area (converged or stuck)
+#'   \item Jumps at iteration boundaries: new models found different region
+#'   \item Shaky within iteration: models disagree about minimum location
+#'   \item Smooth within iteration: models agree on minimum location
 #' }
 #'
 #' @param x An aps_result object
@@ -368,7 +370,7 @@ plot_correlation <- function(x, competitiveness = 0.2, show_rho_star = TRUE, k =
 #'   space diameter (max possible distance). Default TRUE.
 #' @param ... Additional arguments (ignored)
 #'
-#' @return A ggplot2 object with two panels: cumulative distance and per-iteration metrics
+#' @return A ggplot2 object showing cumulative distance traveled
 #' @export
 #'
 #' @examples
@@ -400,17 +402,17 @@ plot_distance <- function(x, normalize = TRUE, ...) {
     diameter <- 1
   }
 
-  # For each iteration, identify exploitation points and compute centroid
-  results <- data.frame(
+  # Extract all exploitation points in order
+  exploit_points <- data.frame(
+    point_idx = integer(),
     iteration = integer(),
-    centroid_x = I(list()),  # Store as list column for multi-dim
-    jump_distance = numeric(),
-    within_spread = numeric(),
-    n_exploit = integer()
+    distance_from_prev = numeric()
   )
 
-  prev_centroid <- NULL
+  # Also store the x coordinates for distance calculation
+  exploit_x_list <- list()
 
+  point_counter <- 0
   for (i in 0:n_iter) {
     iter_idx <- which(iteration == i)
     if (length(iter_idx) == 0) next
@@ -421,73 +423,59 @@ plot_distance <- function(x, normalize = TRUE, ...) {
 
     # Exploitation points are the first n_exploit in each iteration
     exploit_idx <- iter_idx[1:n_exploit]
-    exploit_x <- x_mat[exploit_idx, , drop = FALSE]
 
-    # Compute centroid
-    centroid <- colMeans(exploit_x)
+    for (j in seq_along(exploit_idx)) {
+      point_counter <- point_counter + 1
+      current_x <- x_mat[exploit_idx[j], ]
 
-    # Compute jump distance from previous iteration
-    if (is.null(prev_centroid)) {
-      jump_dist <- 0
-    } else {
-      jump_dist <- sqrt(sum((centroid - prev_centroid)^2)) / diameter
+      # Compute distance from previous point
+      if (point_counter == 1) {
+        dist_from_prev <- 0
+      } else {
+        prev_x <- exploit_x_list[[point_counter - 1]]
+        dist_from_prev <- sqrt(sum((current_x - prev_x)^2)) / diameter
+      }
+
+      exploit_x_list[[point_counter]] <- current_x
+
+      exploit_points <- rbind(exploit_points, data.frame(
+        point_idx = point_counter,
+        iteration = i,
+        distance_from_prev = dist_from_prev
+      ))
     }
-
-    # Compute within-iteration spread (mean distance to centroid)
-    if (nrow(exploit_x) > 1) {
-      dists_to_centroid <- apply(exploit_x, 1, function(row) {
-        sqrt(sum((row - centroid)^2))
-      })
-      within_spread <- mean(dists_to_centroid) / diameter
-    } else {
-      within_spread <- 0
-    }
-
-    results <- rbind(results, data.frame(
-      iteration = i,
-      jump_distance = jump_dist,
-      within_spread = within_spread,
-      n_exploit = n_exploit
-    ))
-
-    prev_centroid <- centroid
   }
 
   # Compute cumulative distance
-  results$cumulative_distance <- cumsum(results$jump_distance)
+  exploit_points$cumulative_distance <- cumsum(exploit_points$distance_from_prev)
 
-  # Create plot data for faceting
-  plot_df <- data.frame(
-    iteration = rep(results$iteration, 3),
-    value = c(results$cumulative_distance, results$jump_distance, results$within_spread),
-    metric = rep(c("Cumulative Distance", "Jump Distance", "Within-Iteration Spread"),
-                 each = nrow(results))
-  )
-  plot_df$metric <- factor(plot_df$metric,
-                           levels = c("Cumulative Distance", "Jump Distance", "Within-Iteration Spread"))
+  # Find iteration boundaries for vertical lines
+  iter_boundaries <- which(diff(exploit_points$iteration) != 0) + 0.5
 
   # Build subtitle
-  total_dist <- max(results$cumulative_distance)
-  final_spread <- results$within_spread[nrow(results)]
+  total_dist <- max(exploit_points$cumulative_distance)
+  n_points <- nrow(exploit_points)
   if (normalize) {
     subtitle <- sprintf(
-      "Total distance: %.2f diameters | Final spread: %.3f diameters",
-      total_dist, final_spread
+      "Total distance: %.2f diameters across %d exploitation points",
+      total_dist, n_points
     )
   } else {
-    subtitle <- sprintf("Total distance: %.2f | Final spread: %.3f", total_dist, final_spread)
+    subtitle <- sprintf("Total distance: %.2f across %d points", total_dist, n_points)
   }
 
   # Create plot
-  p <- ggplot2::ggplot(plot_df, ggplot2::aes(x = iteration, y = value)) +
+  p <- ggplot2::ggplot(exploit_points, ggplot2::aes(x = point_idx, y = cumulative_distance)) +
     ggplot2::geom_line(color = "#1f78b4", linewidth = 0.8) +
-    ggplot2::geom_point(color = "#1f78b4", size = 2) +
-    ggplot2::facet_wrap(~metric, scales = "free_y", ncol = 1) +
-    ggplot2::scale_x_continuous(breaks = 0:n_iter) +
+    ggplot2::geom_point(ggplot2::aes(color = factor(iteration)), size = 1.5, alpha = 0.7) +
+    ggplot2::geom_vline(xintercept = iter_boundaries, linetype = "dashed",
+                        color = "gray50", alpha = 0.5) +
+    ggplot2::scale_color_discrete() +
     ggplot2::theme_minimal() +
+    ggplot2::theme(legend.position = "none") +
     ggplot2::labs(
-      x = "Iteration",
-      y = if (normalize) "Distance (normalized by diameter)" else "Distance",
+      x = "Exploitation Point",
+      y = if (normalize) "Cumulative Distance (normalized)" else "Cumulative Distance",
       title = "Exploitation Point Distance Tracking",
       subtitle = subtitle
     )
