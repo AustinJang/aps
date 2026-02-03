@@ -349,12 +349,159 @@ plot_correlation <- function(x, competitiveness = 0.2, show_rho_star = TRUE, k =
 }
 
 
+#' Plot Exploitation Point Distance Tracking
+#'
+#' Visualizes how the predicted minimum location changes across iterations.
+#' Shows both the cumulative distance traveled and per-iteration metrics.
+#'
+#' This diagnostic complements rho_tilde by showing WHERE the surrogate thinks
+#' the minimum is, not just how well it predicts. Key patterns:
+#' \itemize{
+#'   \item Large jumps between iterations: surrogate learning, changing its mind
+#'   \item Flat cumulative curve: converged, surrogate confident about location
+#'   \item High within-iteration spread: models disagree about minimum location
+#'   \item Low within-iteration spread: models agree on minimum location
+#' }
+#'
+#' @param x An aps_result object
+#' @param normalize Logical. If TRUE, distances are normalized by the parameter
+#'   space diameter (max possible distance). Default TRUE.
+#' @param ... Additional arguments (ignored)
+#'
+#' @return A ggplot2 object with two panels: cumulative distance and per-iteration metrics
+#' @export
+#'
+#' @examples
+#' \dontrun{
+#' result <- aps(obj_function, n_params = 2)
+#' plot_distance(result)
+#' }
+plot_distance <- function(x, normalize = TRUE, ...) {
+  if (!inherits(x, "aps_result")) {
+    stop("x must be an aps_result object")
+  }
+
+  if (!requireNamespace("ggplot2", quietly = TRUE)) {
+    stop("Package 'ggplot2' is required for plotting. Install it with install.packages('ggplot2')")
+  }
+
+  # Extract data
+  x_mat <- x$x
+  iteration <- x$iteration
+  n_iter <- x$n_iter
+  exploit_ratio <- if (!is.null(x$exploit_ratio)) x$exploit_ratio else 0.5
+
+  # Compute parameter space diameter for normalization
+  if (normalize) {
+    ranges <- apply(x_mat, 2, function(col) diff(range(col)))
+    diameter <- sqrt(sum(ranges^2))
+    if (diameter == 0) diameter <- 1
+  } else {
+    diameter <- 1
+  }
+
+  # For each iteration, identify exploitation points and compute centroid
+  results <- data.frame(
+    iteration = integer(),
+    centroid_x = I(list()),  # Store as list column for multi-dim
+    jump_distance = numeric(),
+    within_spread = numeric(),
+    n_exploit = integer()
+  )
+
+  prev_centroid <- NULL
+
+  for (i in 0:n_iter) {
+    iter_idx <- which(iteration == i)
+    if (length(iter_idx) == 0) next
+
+    n_in_iter <- length(iter_idx)
+    n_exploit <- floor(n_in_iter * exploit_ratio)
+    if (n_exploit == 0) n_exploit <- 1
+
+    # Exploitation points are the first n_exploit in each iteration
+    exploit_idx <- iter_idx[1:n_exploit]
+    exploit_x <- x_mat[exploit_idx, , drop = FALSE]
+
+    # Compute centroid
+    centroid <- colMeans(exploit_x)
+
+    # Compute jump distance from previous iteration
+    if (is.null(prev_centroid)) {
+      jump_dist <- 0
+    } else {
+      jump_dist <- sqrt(sum((centroid - prev_centroid)^2)) / diameter
+    }
+
+    # Compute within-iteration spread (mean distance to centroid)
+    if (nrow(exploit_x) > 1) {
+      dists_to_centroid <- apply(exploit_x, 1, function(row) {
+        sqrt(sum((row - centroid)^2))
+      })
+      within_spread <- mean(dists_to_centroid) / diameter
+    } else {
+      within_spread <- 0
+    }
+
+    results <- rbind(results, data.frame(
+      iteration = i,
+      jump_distance = jump_dist,
+      within_spread = within_spread,
+      n_exploit = n_exploit
+    ))
+
+    prev_centroid <- centroid
+  }
+
+  # Compute cumulative distance
+  results$cumulative_distance <- cumsum(results$jump_distance)
+
+  # Create plot data for faceting
+  plot_df <- data.frame(
+    iteration = rep(results$iteration, 3),
+    value = c(results$cumulative_distance, results$jump_distance, results$within_spread),
+    metric = rep(c("Cumulative Distance", "Jump Distance", "Within-Iteration Spread"),
+                 each = nrow(results))
+  )
+  plot_df$metric <- factor(plot_df$metric,
+                           levels = c("Cumulative Distance", "Jump Distance", "Within-Iteration Spread"))
+
+  # Build subtitle
+  total_dist <- max(results$cumulative_distance)
+  final_spread <- results$within_spread[nrow(results)]
+  if (normalize) {
+    subtitle <- sprintf(
+      "Total distance: %.2f diameters | Final spread: %.3f diameters",
+      total_dist, final_spread
+    )
+  } else {
+    subtitle <- sprintf("Total distance: %.2f | Final spread: %.3f", total_dist, final_spread)
+  }
+
+  # Create plot
+  p <- ggplot2::ggplot(plot_df, ggplot2::aes(x = iteration, y = value)) +
+    ggplot2::geom_line(color = "#1f78b4", linewidth = 0.8) +
+    ggplot2::geom_point(color = "#1f78b4", size = 2) +
+    ggplot2::facet_wrap(~metric, scales = "free_y", ncol = 1) +
+    ggplot2::scale_x_continuous(breaks = 0:n_iter) +
+    ggplot2::theme_minimal() +
+    ggplot2::labs(
+      x = "Iteration",
+      y = if (normalize) "Distance (normalized by diameter)" else "Distance",
+      title = "Exploitation Point Distance Tracking",
+      subtitle = subtitle
+    )
+
+  p
+}
+
+
 #' Plot Method for aps_result
 #'
 #' Default plot method showing performance over iterations.
 #'
 #' @param x An aps_result object
-#' @param type Type of plot: "performance" (default) or "correlation"
+#' @param type Type of plot: "performance" (default), "correlation", or "distance"
 #' @param ... Additional arguments passed to specific plot functions
 #'
 #' @return A ggplot2 object
@@ -363,6 +510,7 @@ plot.aps_result <- function(x, type = "performance", ...) {
   switch(type,
     "performance" = plot_performance(x, ...),
     "correlation" = plot_correlation(x, ...),
-    stop("Unknown plot type. Use 'performance' or 'correlation'")
+    "distance" = plot_distance(x, ...),
+    stop("Unknown plot type. Use 'performance', 'correlation', or 'distance'")
   )
 }
