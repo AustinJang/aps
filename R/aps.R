@@ -151,7 +151,8 @@ aps <- function(obj_function,
                 early_stop = FALSE,
                 rho_tilde_threshold = 0.95,
                 min_stable_iters = 2,
-                invalid_penalty = NULL) {
+                invalid_penalty = NULL,
+                rho_decay = 1.0) {
 
   # Helper to check if a y value is valid (not NA, NULL, Inf, NaN, or non-numeric)
   is_valid_y <- function(y) {
@@ -257,6 +258,15 @@ aps <- function(obj_function,
     # Restore current architecture state (the "keep" models from last iteration)
     last_iter_arch <- architecture_history[architecture_history$iteration == max(architecture_history$iteration), ]
     architecture_df <- last_iter_arch[last_iter_arch$keep, c("depth", "width", "reg", "dropout", "activation")]
+
+    # Handle n_models mismatch: truncate if checkpoint has more, add if fewer
+    if (nrow(architecture_df) > n_models) {
+      if (verbose) {
+        message(sprintf("Note: Checkpoint had %d models, truncating to n_models=%d",
+                        nrow(architecture_df), n_models))
+      }
+      architecture_df <- architecture_df[1:n_models, ]
+    }
     n_bad_models <- n_models - nrow(architecture_df)
 
     # Fill in with new architectures if needed
@@ -353,8 +363,8 @@ aps <- function(obj_function,
     }
   }
 
-  # Early stopping tracking
-  prev_best_y <- min(y_train)
+  # Early stopping tracking (use exploitation mean, not noisy global minimum)
+  prev_exploit_mean <- NA  # Will be set after first iteration
   stable_iter_count <- 0
   stopped_early <- FALSE
 
@@ -420,6 +430,16 @@ aps <- function(obj_function,
       }
     }
 
+    # Compute exploitation mean for early stopping (more robust than noisy global minimum)
+    n_exploit_pts <- floor(n_obs * exploit_ratio)
+    if (n_exploit_pts > 0) {
+      exploit_y <- new_y[1:n_exploit_pts]
+      valid_exploit_y <- exploit_y[sapply(exploit_y, is_valid_y)]
+      current_exploit_mean <- if (length(valid_exploit_y) > 0) mean(valid_exploit_y) else NA
+    } else {
+      current_exploit_mean <- NA
+    }
+
     # Update architecture performance tracking
     architecture_df$cor_in <- NA
     architecture_df$cor_out <- NA
@@ -459,13 +479,79 @@ aps <- function(obj_function,
 
     # Generate new architectures to replace bad ones
     n_bad_models <- sum(!architecture_df$keep)
+
+    # Compute rho_star (noise ceiling) using hybrid variance estimation:
+    # - Clustered points (replicates at same x): direct Var[Y|X=x]
+    # - Singletons: NN approximation
+    # This uses exact variance when available, approximation only when needed.
+    rho_star_iter <- NA
+    rho_tilde_iter <- NA
+    sigma2_iter <- NA
+
+    if (nrow(x_train) >= 20 && requireNamespace("FNN", quietly = TRUE)) {
+      # Identify clusters: points with identical x values
+      x_key <- apply(round(x_train, digits = 10), 1, paste, collapse = "_")
+      cluster_counts <- table(x_key)
+
+      # Separate clusters (n>=2) from singletons (n=1)
+      cluster_keys <- names(cluster_counts[cluster_counts >= 2])
+      singleton_keys <- names(cluster_counts[cluster_counts == 1])
+
+      # Accumulate variance contributions and degrees of freedom
+      total_ss <- 0  # Sum of squared deviations
+      total_df <- 0  # Total degrees of freedom
+
+      # 1) CLUSTERS: Direct within-cluster variance
+      for (key in cluster_keys) {
+        idx <- which(x_key == key)
+        n_c <- length(idx)
+        cluster_var <- var(y_train[idx])  # Unbiased sample variance
+        total_ss <- total_ss + (n_c - 1) * cluster_var
+        total_df <- total_df + (n_c - 1)
+      }
+
+      # 2) SINGLETONS: NN approximation
+      singleton_idx <- which(x_key %in% singleton_keys)
+      if (length(singleton_idx) > 0) {
+        # Find nearest neighbor for each singleton (excluding self)
+        nn_result <- FNN::get.knn(x_train, k = 1)
+        nn_idx <- nn_result$nn.index[singleton_idx, 1]
+        sq_diffs <- (y_train[singleton_idx] - y_train[nn_idx])^2
+        # E[(y - y_nn)^2] = 2*sigma^2, so each contributes sq_diff/2 with df=1
+        total_ss <- total_ss + sum(sq_diffs) / 2
+        total_df <- total_df + length(singleton_idx)
+      }
+
+      # Aggregate: sigma2 = total_ss / total_df
+      if (total_df > 0) {
+        sigma2_iter <- total_ss / total_df
+
+        # Compute rho* from sigma2
+        var_y_iter <- var(y_train)
+        tau2_iter <- max(0, var_y_iter - sigma2_iter)
+
+        if (tau2_iter + sigma2_iter > 0) {
+          rho_star_iter <- sqrt(tau2_iter) / sqrt(tau2_iter + sigma2_iter)
+          rho_tilde_iter <- if (rho_star_iter > 0) best_cor_out / rho_star_iter else NA
+          rho_tilde_iter <- min(1, rho_tilde_iter)  # Cap at 1
+        }
+      }
+    }
+
     if (verbose) {
       cat("\r", strrep(" ", 60), "\r", sep = "")  # Clear progress line
       message(sprintf("Models kept: %d, replaced: %d", n_models - n_bad_models, n_bad_models))
-      message(sprintf("Best in-sample cor: %.3f, Best out-of-sample cor: %.3f",
-                      best_cor_in, best_cor_out))
-      # Show iteration mean (more stable than single minimum which can be noisy)
-      message(sprintf("Iteration mean y: %.4f (min: %.4f)", mean(new_y), min(new_y)))
+      # Include rho* (noise ceiling) alongside correlations
+      if (!is.na(rho_star_iter)) {
+        message(sprintf("Correlations: in=%.3f, out=%.3f, rho*=%.3f, rho~/rho*=%.3f",
+                        best_cor_in, best_cor_out, rho_star_iter, rho_tilde_iter))
+      } else {
+        message(sprintf("Best in-sample cor: %.3f, Best out-of-sample cor: %.3f",
+                        best_cor_in, best_cor_out))
+      }
+      # Show both iteration mean and exploit mean (exploit mean drives early stopping)
+      message(sprintf("Iteration y: mean=%.4f, min=%.4f, exploit_mean=%.4f",
+                      mean(new_y), min(new_y), current_exploit_mean))
     }
 
     # Update architecture for next iteration
@@ -513,37 +599,26 @@ aps <- function(obj_function,
       if (verbose) message(sprintf("Checkpoint saved to %s", checkpoint_file))
     }
 
-    # Early stopping check
+    # Early stopping check (rho_star_iter and rho_tilde_iter already computed above)
     if (early_stop && i >= 2) {
-      # Check if minimum improved
-      current_best_y <- min(y_train)
-      improved <- current_best_y < prev_best_y - 1e-6
+      # Check if exploitation mean improved (more robust than noisy global minimum)
+      # Use a relative tolerance based on the scale of values
+      if (!is.na(current_exploit_mean) && !is.na(prev_exploit_mean)) {
+        tolerance_threshold <- abs(prev_exploit_mean) * 0.01 + 1e-6  # 1% relative + small absolute
+        improved <- current_exploit_mean < prev_exploit_mean - tolerance_threshold
+      } else {
+        improved <- FALSE
+      }
 
       if (improved) {
         stable_iter_count <- 0
-        prev_best_y <- current_best_y
+        prev_exploit_mean <- current_exploit_mean
       } else {
         stable_iter_count <- stable_iter_count + 1
-      }
-
-      # Compute rho_tilde for this iteration
-      # Estimate sigma^2 and tau^2 from the new points
-      if (requireNamespace("FNN", quietly = TRUE) && length(new_y) >= 3) {
-        nn <- FNN::get.knn(new_x, k = 1)
-        sq_diffs <- (new_y - new_y[nn$nn.index[, 1]])^2
-        sigma2_iter <- mean(sq_diffs) / 2
-        var_y_iter <- var(new_y)
-        tau2_iter <- max(0, var_y_iter - sigma2_iter)
-
-        if (tau2_iter + sigma2_iter > 0) {
-          rho_star_iter <- sqrt(tau2_iter) / sqrt(tau2_iter + sigma2_iter)
-          rho_tilde_iter <- if (rho_star_iter > 0) best_cor_out / rho_star_iter else NA
-          rho_tilde_iter <- min(1, rho_tilde_iter)  # Cap at 1
-        } else {
-          rho_tilde_iter <- NA
+        # Still update prev if this is the first valid measurement
+        if (is.na(prev_exploit_mean) && !is.na(current_exploit_mean)) {
+          prev_exploit_mean <- current_exploit_mean
         }
-      } else {
-        rho_tilde_iter <- NA
       }
 
       # Check stopping condition
@@ -553,15 +628,16 @@ aps <- function(obj_function,
         if (verbose) {
           message(sprintf("\n*** EARLY STOP at iteration %d ***", i))
           message(sprintf("rho_tilde = %.3f (>= %.3f threshold)", rho_tilde_iter, rho_tilde_threshold))
-          message(sprintf("Minimum stable for %d iterations", stable_iter_count))
+          message(sprintf("Exploit mean stable for %d iterations (current: %.4f, prev: %.4f)",
+                          stable_iter_count, current_exploit_mean, prev_exploit_mean))
         }
         stopped_early <- TRUE
         break
       }
 
       if (verbose && !is.na(rho_tilde_iter)) {
-        message(sprintf("Early stop check: rho_tilde=%.3f, stable_iters=%d",
-                        rho_tilde_iter, stable_iter_count))
+        message(sprintf("Early stop check: rho_tilde=%.3f, stable_iters=%d, exploit_mean=%.4f",
+                        rho_tilde_iter, stable_iter_count, current_exploit_mean))
       }
     }
   }
