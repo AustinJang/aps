@@ -170,16 +170,45 @@ for (epoch in 1:epochs) {
 #' The required columns are: depth, width, reg, dropout, activation.
 #'
 #' @param n Number of architectures to generate
+#' @param config Optional list specifying architecture parameter ranges. If NULL,
+#'   uses defaults. Supported keys:
+#'   \itemize{
+#'     \item \code{depth}: Integer vector of allowed depths (default: 1:5)
+#'     \item \code{width}: Integer vector of allowed widths (default: c(32, 64, 128, 256, 512))
+#'     \item \code{reg}: Numeric vector of allowed regularization values (default: seq(0, 0.0005, 0.0001))
+#'     \item \code{dropout}: Numeric vector of allowed dropout values (default: seq(0, 0.5, 0.1))
+#'     \item \code{activation}: Character vector of allowed activations (default: c("relu", "sigmoid", "tanh"))
+#'   }
 #'
 #' @return A data frame with architecture specifications
 #' @export
-generate_architectures <- function(n) {
+generate_architectures <- function(n, config = NULL) {
+  # Default configuration
+  defaults <- list(
+    depth = 1:5,
+    width = c(32, 64, 128, 256, 512),
+    reg = seq(0, 0.0005, by = 0.0001),
+    dropout = seq(0, 0.5, by = 0.1),
+    activation = c("relu", "sigmoid", "tanh")
+  )
+
+  # Merge user config with defaults
+  if (!is.null(config)) {
+    for (key in names(config)) {
+      if (key %in% names(defaults)) {
+        defaults[[key]] <- config[[key]]
+      } else {
+        warning(sprintf("Unknown architecture_config key '%s' ignored", key))
+      }
+    }
+  }
+
   data.frame(
-    depth = sample(1:5, n, replace = TRUE),
-    width = 2^(4 + sample(1:5, n, replace = TRUE)),  # 32, 64, 128, 256, 512
-    reg = sample(0:5, n, replace = TRUE) * 0.0001,
-    dropout = sample(0:5, n, replace = TRUE) * 0.1,
-    activation = sample(c("relu", "sigmoid", "tanh"), n, replace = TRUE),
+    depth = sample(defaults$depth, n, replace = TRUE),
+    width = sample(defaults$width, n, replace = TRUE),
+    reg = sample(defaults$reg, n, replace = TRUE),
+    dropout = sample(defaults$dropout, n, replace = TRUE),
+    activation = sample(defaults$activation, n, replace = TRUE),
     stringsAsFactors = FALSE
   )
 }
@@ -193,24 +222,52 @@ generate_architectures <- function(n) {
 #'
 #' Mutations include:
 #' \itemize{
-#'   \item depth: +1 or -1 (bounded to 1-5)
-#'   \item width: multiply by 2 or divide by 2 (bounded to 32-512)
-#'   \item activation: randomly swap to a different function
-#'   \item reg/dropout: small random perturbation
+#'   \item depth: +1 or -1 (bounded by config)
+#'   \item width: multiply by 2 or divide by 2 (bounded by config)
+#'   \item activation: randomly swap to a different function from config
+#'   \item reg/dropout: small random perturbation (bounded by config)
 #' }
 #'
 #' @param parents Data frame of parent architectures to mutate
 #' @param n Number of mutated children to generate
 #' @param mutation_rate Probability of mutating each parameter (default 0.3)
+#' @param config Optional list specifying architecture parameter ranges (same format
+#'   as \code{generate_architectures}). Used to bound mutations.
 #'
 #' @return A data frame with mutated architecture specifications
 #' @export
-mutate_architectures <- function(parents, n, mutation_rate = 0.3) {
+mutate_architectures <- function(parents, n, mutation_rate = 0.3, config = NULL) {
   if (nrow(parents) == 0) {
-    return(generate_architectures(n))
+    return(generate_architectures(n, config))
   }
 
-  activations <- c("relu", "sigmoid", "tanh")
+  # Default configuration (same as generate_architectures)
+  defaults <- list(
+    depth = 1:5,
+    width = c(32, 64, 128, 256, 512),
+    reg = seq(0, 0.0005, by = 0.0001),
+    dropout = seq(0, 0.5, by = 0.1),
+    activation = c("relu", "sigmoid", "tanh")
+  )
+
+  # Merge user config with defaults
+  if (!is.null(config)) {
+    for (key in names(config)) {
+      if (key %in% names(defaults)) {
+        defaults[[key]] <- config[[key]]
+      }
+    }
+  }
+
+  # Extract bounds from config
+  depth_min <- min(defaults$depth)
+  depth_max <- max(defaults$depth)
+  width_min <- min(defaults$width)
+  width_max <- max(defaults$width)
+  reg_max <- max(defaults$reg)
+  dropout_max <- max(defaults$dropout)
+  activations <- defaults$activation
+
   children <- data.frame(
     depth = integer(n),
     width = integer(n),
@@ -227,7 +284,8 @@ mutate_architectures <- function(parents, n, mutation_rate = 0.3) {
     # Mutate depth
     if (runif(1) < mutation_rate) {
       delta <- sample(c(-1, 1), 1)
-      children$depth[i] <- max(1, min(5, parent$depth + delta))
+      new_depth <- parent$depth + delta
+      children$depth[i] <- max(depth_min, min(depth_max, new_depth))
     } else {
       children$depth[i] <- parent$depth
     }
@@ -235,7 +293,8 @@ mutate_architectures <- function(parents, n, mutation_rate = 0.3) {
     # Mutate width
     if (runif(1) < mutation_rate) {
       factor <- sample(c(0.5, 2), 1)
-      children$width[i] <- max(32, min(512, round(parent$width * factor)))
+      new_width <- round(parent$width * factor)
+      children$width[i] <- max(width_min, min(width_max, new_width))
     } else {
       children$width[i] <- parent$width
     }
@@ -243,21 +302,25 @@ mutate_architectures <- function(parents, n, mutation_rate = 0.3) {
     # Mutate activation
     if (runif(1) < mutation_rate) {
       other_acts <- setdiff(activations, parent$activation)
-      children$activation[i] <- sample(other_acts, 1)
+      if (length(other_acts) > 0) {
+        children$activation[i] <- sample(other_acts, 1)
+      } else {
+        children$activation[i] <- parent$activation
+      }
     } else {
       children$activation[i] <- parent$activation
     }
 
     # Mutate regularization
     if (runif(1) < mutation_rate) {
-      children$reg[i] <- max(0, parent$reg + rnorm(1, 0, 0.0001))
+      children$reg[i] <- max(0, min(reg_max, parent$reg + rnorm(1, 0, 0.0001)))
     } else {
       children$reg[i] <- parent$reg
     }
 
     # Mutate dropout
     if (runif(1) < mutation_rate) {
-      children$dropout[i] <- max(0, min(0.5, parent$dropout + rnorm(1, 0, 0.1)))
+      children$dropout[i] <- max(0, min(dropout_max, parent$dropout + rnorm(1, 0, 0.1)))
     } else {
       children$dropout[i] <- parent$dropout
     }
