@@ -27,7 +27,9 @@ plot_performance <- function(x, round_digits = 3, ...) {
   # Determine exploration vs exploitation
   iter_size <- x$n_obs
   n_iter <- x$n_iter
-  exploit_ratio <- if (!is.null(x$exploit_ratio)) x$exploit_ratio else 0.5
+  # Backward compat: old results have exploit_ratio, new have epsilon
+  epsilon <- if (!is.null(x$epsilon)) x$epsilon else
+    if (!is.null(x$exploit_ratio)) 1 - x$exploit_ratio else 0.5
 
   # Build data frame
   df <- data.frame(
@@ -35,13 +37,13 @@ plot_performance <- function(x, round_digits = 3, ...) {
     iteration = x$iteration
   )
 
-  # Within each iteration, exploit_ratio fraction is exploit, rest is explore
+  # Within each iteration, first (1-epsilon) fraction is exploit, rest is explore
   df$action <- "Exploit"
   for (i in 0:n_iter) {
     idx <- which(df$iteration == i)
     if (length(idx) > 0) {
       n_in_iter <- length(idx)
-      n_exploit <- floor(n_in_iter * exploit_ratio)
+      n_exploit <- n_in_iter - floor(n_in_iter * epsilon)
       if (n_exploit < n_in_iter) {
         df$action[idx[(n_exploit + 1):n_in_iter]] <- "Explore"
       }
@@ -391,7 +393,9 @@ plot_distance <- function(x, normalize = TRUE, ...) {
   x_mat <- x$x
   iteration <- x$iteration
   n_iter <- x$n_iter
-  exploit_ratio <- if (!is.null(x$exploit_ratio)) x$exploit_ratio else 0.5
+  # Backward compat: old results have exploit_ratio, new have epsilon
+  epsilon <- if (!is.null(x$epsilon)) x$epsilon else
+    if (!is.null(x$exploit_ratio)) 1 - x$exploit_ratio else 0.5
 
   # Compute parameter space diameter for normalization
   if (normalize) {
@@ -418,7 +422,7 @@ plot_distance <- function(x, normalize = TRUE, ...) {
     if (length(iter_idx) == 0) next
 
     n_in_iter <- length(iter_idx)
-    n_exploit <- floor(n_in_iter * exploit_ratio)
+    n_exploit <- n_in_iter - floor(n_in_iter * epsilon)
     if (n_exploit == 0) n_exploit <- 1
 
     # Exploitation points are the first n_exploit in each iteration
@@ -490,11 +494,16 @@ plot_distance <- function(x, normalize = TRUE, ...) {
 #'
 #' @param x An aps_result object
 #' @param type Type of plot: "performance" (default), "correlation", or "distance"
+#' @param reduction Optional reduction function. If provided, calls rereduce()
+#'   before plotting, allowing quick visualization of alternative objectives.
 #' @param ... Additional arguments passed to specific plot functions
 #'
 #' @return A ggplot2 object
 #' @export
-plot.aps_result <- function(x, type = "performance", ...) {
+plot.aps_result <- function(x, type = "performance", reduction = NULL, ...) {
+  if (!is.null(reduction)) {
+    x <- rereduce(x, reduction)
+  }
   switch(type,
     "performance" = plot_performance(x, ...),
     "correlation" = plot_correlation(x, ...),

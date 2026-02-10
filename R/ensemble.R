@@ -159,6 +159,108 @@ for (epoch in 1:epochs) {
 }
 
 
+# Safe sample that handles length-1 vectors correctly.
+# R's sample(x, n) treats a single integer x as sample(1:x, n), which is wrong
+# when we want to sample from a vector that happens to have one element.
+safe_sample <- function(x, size, replace = FALSE) {
+  if (length(x) == 1L) rep(x, size) else sample(x, size, replace = replace)
+}
+
+
+#' Get Tier Bounds
+#'
+#' Maps a tier integer to the maximum allowed depth and width. Tier 0 uses the
+#' smallest values from the config; each subsequent tier unlocks the next step.
+#'
+#' @param tier Integer tier level (0-based)
+#' @param config Optional architecture config list (with \code{depth} and \code{width})
+#'
+#' @return List with \code{max_depth}, \code{max_width}, \code{min_depth}, \code{min_width}
+#' @keywords internal
+get_tier_bounds <- function(tier, config = NULL) {
+  depth_steps <- sort(unique(
+    if (!is.null(config) && !is.null(config$depth)) config$depth else 1:5
+  ))
+  width_steps <- sort(unique(
+    if (!is.null(config) && !is.null(config$width)) config$width else c(32, 64, 128, 256, 512)
+  ))
+
+  d_idx <- min(tier + 1, length(depth_steps))
+  w_idx <- min(tier + 1, length(width_steps))
+
+  list(
+    max_depth = depth_steps[d_idx],
+    max_width = width_steps[w_idx],
+    min_depth = depth_steps[1],
+    min_width = width_steps[1]
+  )
+}
+
+
+#' Compute Maximum Tier
+#'
+#' Derives the maximum tier from the architecture config's depth and width ranges.
+#' The max tier is the number of steps needed to unlock all depth/width values.
+#'
+#' @param config Optional architecture config list
+#'
+#' @return Integer maximum tier
+#' @keywords internal
+compute_max_tier <- function(config = NULL) {
+  n_depth <- length(unique(
+    if (!is.null(config) && !is.null(config$depth)) config$depth else 1:5
+  ))
+  n_width <- length(unique(
+    if (!is.null(config) && !is.null(config$width)) config$width else c(32, 64, 128, 256, 512)
+  ))
+  max(n_depth, n_width) - 1
+}
+
+
+#' Next Width Step
+#'
+#' Given a current width, returns the next larger width in the config's width
+#' sequence. If already at max, returns current width.
+#'
+#' @param current_width Current width value
+#' @param config Optional architecture config list
+#'
+#' @return Integer next width step
+#' @keywords internal
+next_width_step <- function(current_width, config = NULL) {
+  width_options <- sort(unique(
+    if (!is.null(config) && !is.null(config$width)) config$width else c(32, 64, 128, 256, 512)
+  ))
+  above <- width_options[width_options > current_width]
+  if (length(above) > 0) above[1] else current_width
+}
+
+
+#' Infer Tier from Existing Architectures
+#'
+#' Determines the minimum tier that accommodates the architectures already in use.
+#' Used when resuming from a checkpoint that doesn't store the tier.
+#'
+#' @param arch_df Data frame of current architectures
+#' @param config Optional architecture config list
+#'
+#' @return Integer tier
+#' @keywords internal
+infer_tier <- function(arch_df, config = NULL) {
+  max_d <- max(arch_df$depth)
+  max_w <- max(arch_df$width)
+  max_possible <- compute_max_tier(config)
+
+  for (t in 0:max_possible) {
+    bounds <- get_tier_bounds(t, config)
+    if (bounds$max_depth >= max_d && bounds$max_width >= max_w) {
+      return(t)
+    }
+  }
+  max_possible
+}
+
+
 #' Generate Random Architecture
 #'
 #' Generates a random neural network architecture specification with uniform
@@ -179,10 +281,13 @@ for (epoch in 1:epochs) {
 #'     \item \code{dropout}: Numeric vector of allowed dropout values (default: seq(0, 0.5, 0.1))
 #'     \item \code{activation}: Character vector of allowed activations (default: c("relu", "sigmoid", "tanh"))
 #'   }
+#' @param tier Optional integer tier level. When provided, depth and width are
+#'   capped at the tier's bounds (see \code{get_tier_bounds}). If NULL (default),
+#'   full config ranges are used (backward compatible).
 #'
 #' @return A data frame with architecture specifications
 #' @export
-generate_architectures <- function(n, config = NULL) {
+generate_architectures <- function(n, config = NULL, tier = NULL) {
   # Default configuration
   defaults <- list(
     depth = 1:5,
@@ -203,12 +308,21 @@ generate_architectures <- function(n, config = NULL) {
     }
   }
 
+  # Apply tier constraints to depth and width
+  if (!is.null(tier)) {
+    bounds <- get_tier_bounds(tier, config)
+    defaults$depth <- defaults$depth[defaults$depth <= bounds$max_depth]
+    defaults$width <- defaults$width[defaults$width <= bounds$max_width]
+    if (length(defaults$depth) == 0) defaults$depth <- bounds$max_depth
+    if (length(defaults$width) == 0) defaults$width <- bounds$max_width
+  }
+
   data.frame(
-    depth = sample(defaults$depth, n, replace = TRUE),
-    width = sample(defaults$width, n, replace = TRUE),
-    reg = sample(defaults$reg, n, replace = TRUE),
-    dropout = sample(defaults$dropout, n, replace = TRUE),
-    activation = sample(defaults$activation, n, replace = TRUE),
+    depth = safe_sample(defaults$depth, n, replace = TRUE),
+    width = safe_sample(defaults$width, n, replace = TRUE),
+    reg = safe_sample(defaults$reg, n, replace = TRUE),
+    dropout = safe_sample(defaults$dropout, n, replace = TRUE),
+    activation = safe_sample(defaults$activation, n, replace = TRUE),
     stringsAsFactors = FALSE
   )
 }
@@ -233,12 +347,15 @@ generate_architectures <- function(n, config = NULL) {
 #' @param mutation_rate Probability of mutating each parameter (default 0.3)
 #' @param config Optional list specifying architecture parameter ranges (same format
 #'   as \code{generate_architectures}). Used to bound mutations.
+#' @param tier Optional integer tier level. When provided, depth and width mutations
+#'   are capped at the tier's bounds, and the incremental constraint is enforced:
+#'   depth and width cannot both increase relative to the parent in a single mutation.
 #'
 #' @return A data frame with mutated architecture specifications
 #' @export
-mutate_architectures <- function(parents, n, mutation_rate = 0.3, config = NULL) {
+mutate_architectures <- function(parents, n, mutation_rate = 0.3, config = NULL, tier = NULL) {
   if (nrow(parents) == 0) {
-    return(generate_architectures(n, config))
+    return(generate_architectures(n, config, tier = tier))
   }
 
   # Default configuration (same as generate_architectures)
@@ -259,11 +376,17 @@ mutate_architectures <- function(parents, n, mutation_rate = 0.3, config = NULL)
     }
   }
 
-  # Extract bounds from config
+  # Extract bounds from config, applying tier cap if active
   depth_min <- min(defaults$depth)
-  depth_max <- max(defaults$depth)
   width_min <- min(defaults$width)
-  width_max <- max(defaults$width)
+  if (!is.null(tier)) {
+    bounds <- get_tier_bounds(tier, config)
+    depth_max <- bounds$max_depth
+    width_max <- bounds$max_width
+  } else {
+    depth_max <- max(defaults$depth)
+    width_max <- max(defaults$width)
+  }
   reg_max <- max(defaults$reg)
   dropout_max <- max(defaults$dropout)
   activations <- defaults$activation
@@ -299,7 +422,19 @@ mutate_architectures <- function(parents, n, mutation_rate = 0.3, config = NULL)
       children$width[i] <- parent$width
     }
 
-    # Mutate activation
+    # Incremental constraint: can't increase both depth and width vs parent
+    if (!is.null(tier)) {
+      if (children$depth[i] > parent$depth && children$width[i] > parent$width) {
+        # Roll back one dimension (randomly)
+        if (runif(1) < 0.5) {
+          children$depth[i] <- parent$depth
+        } else {
+          children$width[i] <- parent$width
+        }
+      }
+    }
+
+    # Mutate activation (cheap dimension, no constraint)
     if (runif(1) < mutation_rate) {
       other_acts <- setdiff(activations, parent$activation)
       if (length(other_acts) > 0) {
@@ -311,14 +446,14 @@ mutate_architectures <- function(parents, n, mutation_rate = 0.3, config = NULL)
       children$activation[i] <- parent$activation
     }
 
-    # Mutate regularization
+    # Mutate regularization (cheap dimension)
     if (runif(1) < mutation_rate) {
       children$reg[i] <- max(0, min(reg_max, parent$reg + rnorm(1, 0, 0.0001)))
     } else {
       children$reg[i] <- parent$reg
     }
 
-    # Mutate dropout
+    # Mutate dropout (cheap dimension)
     if (runif(1) < mutation_rate) {
       children$dropout[i] <- max(0, min(dropout_max, parent$dropout + rnorm(1, 0, 0.1)))
     } else {

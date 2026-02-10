@@ -80,7 +80,7 @@ find_minimum <- function(f_approx,
 #' @param x_min Lower bound for parameters
 #' @param x_max Upper bound for parameters
 #' @param n_candidates Number of candidate points to propose
-#' @param exploit_ratio Fraction of candidates for exploitation vs exploration (default 0.5)
+#' @param epsilon Exploration fraction: proportion of candidates devoted to exploration vs exploitation (default 0.5)
 #' @param n_starting Number of random starting points for optimization
 #' @param tolerance Optimization tolerance
 #'
@@ -92,16 +92,17 @@ propose_candidates <- function(model_list,
                                x_min,
                                x_max,
                                n_candidates,
-                               exploit_ratio = 0.5,
+                               epsilon = 0.5,
                                n_starting = 20,
                                tolerance = 0.01) {
 
   n_params <- ncol(x_train)
   n_models <- length(model_list)
-  n_good_models <- sum(sapply(model_list, function(m) !is.null(m)))
+  n_good_models <- sum(vapply(model_list, function(m) !is.null(m), logical(1)))
 
   # EXPLOITATION: minimize predictions from each model
-  n_exploit <- floor(n_candidates * exploit_ratio)
+  n_explore <- floor(n_candidates * epsilon)
+  n_exploit <- n_candidates - n_explore
   exploit_matrix <- NULL
 
   if (n_good_models >= 1) {

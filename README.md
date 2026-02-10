@@ -57,7 +57,7 @@ plot(result, type = "correlation")
 - `x_min`, `x_max`: Parameter bounds
 - `n_iter`: Number of Bayesian optimization iterations
 - `n_obs`: Observations per iteration
-- `exploit_ratio`: Balance between exploitation (0) and exploration (1), default 0.5
+- `epsilon`: Exploration fraction (0 = pure exploitation, 1 = pure exploration), default 0.5
 
 ## Citation
 

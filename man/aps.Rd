@@ -16,7 +16,7 @@ aps(
   y_init = NULL,
   y_raw_init = NULL,
   num_cores = 1,
-  exploit_ratio = 0.5,
+  epsilon = 0.5,
   competitiveness_param = 0.2,
   tolerance = 0.01,
   verbose = TRUE,
@@ -64,7 +64,7 @@ If provided with a \code{reduction}, \code{y_init} is computed automatically.}
 
 \item{num_cores}{Number of cores for parallel evaluation (default 1)}
 
-\item{exploit_ratio}{Fraction of candidates for exploitation vs exploration (default 0.5)}
+\item{epsilon}{Exploration fraction: proportion of each batch devoted to exploration vs exploitation (default 0.5)}
 
 \item{competitiveness_param}{Threshold for eliminating underperforming models (default 0.2)}
 

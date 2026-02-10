@@ -25,7 +25,7 @@
 #'   mode only). One row per observation, one column per output component.
 #'   If provided with a \code{reduction}, \code{y_init} is computed automatically.
 #' @param num_cores Number of cores for parallel evaluation (default 1)
-#' @param exploit_ratio Fraction of candidates for exploitation vs exploration (default 0.5)
+#' @param epsilon Exploration fraction: proportion of each batch devoted to exploration vs exploitation (default 0.5)
 #' @param competitiveness_param Threshold for eliminating underperforming models (default 0.2)
 #' @param tolerance Optimization convergence tolerance (default 0.01)
 #' @param verbose Print progress messages (default TRUE)
@@ -66,6 +66,9 @@
 #'   above which the surrogate is considered to have learned all signal. Default 0.95.
 #' @param min_stable_iters Number of consecutive iterations without improvement in
 #'   the minimum before early stopping is triggered. Default 2.
+#' @param min_good_models Minimum number of good models (positive out-of-sample
+#'   correlation) required before early stopping can trigger. Prevents premature
+#'   stopping when rho_tilde is high for degenerate reasons. Default 5.
 #' @param invalid_penalty Optional penalty value for invalid y values (NA, NULL,
 #'   Inf, NaN, non-numeric). When the reduction function returns an invalid value,
 #'   APS assigns this penalty and tracks the index. If NULL (default), uses
@@ -138,7 +141,7 @@ aps <- function(obj_function,
                 y_init = NULL,
                 y_raw_init = NULL,
                 num_cores = 1,
-                exploit_ratio = 0.5,
+                epsilon = 0.5,
                 competitiveness_param = 0.2,
                 tolerance = 0.01,
                 verbose = TRUE,
@@ -151,6 +154,7 @@ aps <- function(obj_function,
                 early_stop = FALSE,
                 rho_tilde_threshold = 0.95,
                 min_stable_iters = 2,
+                min_good_models = 5,
                 invalid_penalty = NULL,
                 rho_decay = 1.0) {
 
@@ -256,14 +260,28 @@ aps <- function(obj_function,
     }
 
     # Restore current architecture state (the "keep" models from last iteration)
-    last_iter_arch <- architecture_history[architecture_history$iteration == max(architecture_history$iteration), ]
-    architecture_df <- last_iter_arch[last_iter_arch$keep, c("depth", "width", "reg", "dropout", "activation")]
+    last_iter_arch <- architecture_history[
+      architecture_history$iteration == max(architecture_history$iteration), ]
+    architecture_df <- last_iter_arch[
+      last_iter_arch$keep,
+      c("depth", "width", "reg", "dropout", "activation")
+    ]
+
+    # Restore tier state from checkpoint (or infer from architectures)
+    max_tier <- compute_max_tier(architecture_config)
+    if (!is.null(checkpoint$current_tier)) {
+      current_tier <- checkpoint$current_tier
+    } else {
+      current_tier <- infer_tier(architecture_df, architecture_config)
+    }
+    tier_iter_count <- 0
 
     # Handle n_models mismatch: truncate if checkpoint has more, add if fewer
     if (nrow(architecture_df) > n_models) {
       if (verbose) {
-        message(sprintf("Note: Checkpoint had %d models, truncating to n_models=%d",
-                        nrow(architecture_df), n_models))
+        message(sprintf(
+          "Note: Checkpoint had %d models, truncating to n_models=%d",
+          nrow(architecture_df), n_models))
       }
       architecture_df <- architecture_df[1:n_models, ]
     }
@@ -271,17 +289,41 @@ aps <- function(obj_function,
 
     # Fill in with new architectures if needed
     if (n_bad_models > 0) {
-      if (use_genetic && nrow(architecture_df) > 0) {
-        architecture_df <- rbind(architecture_df, mutate_architectures(architecture_df, n_bad_models, config = architecture_config))
+      bad_df <- last_iter_arch[
+        !last_iter_arch$keep,
+        c("depth", "width", "reg", "dropout", "activation")
+      ]
+      # If we have bad models to reference, use smart replacement
+      if (nrow(bad_df) >= n_bad_models) {
+        bad_df <- bad_df[1:n_bad_models, ]
+        architecture_df <- rbind(
+          architecture_df,
+          smart_replacement(
+            bad_df, architecture_df, architecture_history,
+            tier = current_tier, config = architecture_config
+          )
+        )
       } else {
-        architecture_df <- rbind(architecture_df, generate_architectures(n_bad_models, config = architecture_config))
+        # Fallback: generate at current tier
+        architecture_df <- rbind(
+          architecture_df,
+          generate_architectures(
+            n_bad_models,
+            config = architecture_config,
+            tier = current_tier
+          )
+        )
       }
     }
 
     if (verbose) {
-      message(sprintf("Resumed from iteration %d", start_iter - 1))
+      message(sprintf("Resumed from iteration %d (Tier %d)",
+                      start_iter - 1, current_tier))
       message(sprintf("Existing data: %d points", nrow(x_train)))
-      if (vector_mode) message(sprintf("Vector mode: %d output components", ncol(y_raw_train)))
+      if (vector_mode) {
+        message(sprintf("Vector mode: %d output components",
+                        ncol(y_raw_train)))
+      }
       message(sprintf("Continuing to iteration %d", n_iter))
     }
 
@@ -337,9 +379,14 @@ aps <- function(obj_function,
       iteration_tracker <- rep(0, nrow(x_init))
     }
 
-    # Initialize architecture
-    architecture_df <- generate_architectures(n_models, config = architecture_config)
+    # Initialize architecture at tier 0 (simplest models)
+    current_tier <- 0
+    max_tier <- compute_max_tier(architecture_config)
+    architecture_df <- generate_architectures(
+      n_models, config = architecture_config, tier = 0
+    )
     n_bad_models <- n_models  # All models are "new" initially
+    tier_iter_count <- 0  # Iterations at current tier
 
     # Handle invalid values in initial y
     current_invalid <- which(!sapply(y_train, is_valid_y))
@@ -373,7 +420,10 @@ aps <- function(obj_function,
     n_good_models <- n_models - n_bad_models
 
     if (verbose) {
-      message(sprintf("\n========== ITERATION %d/%d ==========", i, n_iter))
+      message(sprintf(
+        "\n========== ITERATION %d/%d (Tier %d) ==========",
+        i, n_iter, current_tier
+      ))
       message(sprintf("Training data: %d points | Good models: %d",
                       nrow(x_train), n_good_models))
     }
@@ -386,16 +436,23 @@ aps <- function(obj_function,
       verbose = verbose
     )
 
-    # Propose new candidates
+    # Propose new candidates using only validated models.
+    # Positions 1:n_good_models are architectures kept from the prior
+    # iteration; the rest are untested replacements.
     if (verbose) message("Proposing candidates...")
+    validated_models <- if (n_good_models > 0) {
+      model_list[1:n_good_models]
+    } else {
+      list()
+    }
     new_x <- propose_candidates(
-      model_list = model_list,
+      model_list = validated_models,
       x_train = x_train,
       y_train = y_train,
       x_min = x_min,
       x_max = x_max,
       n_candidates = n_obs,
-      exploit_ratio = exploit_ratio,
+      epsilon = epsilon,
       tolerance = tolerance
     )
 
@@ -431,7 +488,7 @@ aps <- function(obj_function,
     }
 
     # Compute exploitation mean for early stopping (more robust than noisy global minimum)
-    n_exploit_pts <- floor(n_obs * exploit_ratio)
+    n_exploit_pts <- n_obs - floor(n_obs * epsilon)
     if (n_exploit_pts > 0) {
       exploit_y <- new_y[1:n_exploit_pts]
       valid_exploit_y <- exploit_y[sapply(exploit_y, is_valid_y)]
@@ -462,15 +519,20 @@ aps <- function(obj_function,
     iteration_tracker <- c(iteration_tracker, rep(i, nrow(new_x)))
 
     # Determine which architectures to keep
-    architecture_df[is.na(architecture_df)] <- -1
+    # Clip NA and negative correlations to 0 (NA = no signal, not anti-signal)
+    architecture_df$cor_in[is.na(architecture_df$cor_in)] <- 0
+    architecture_df$cor_out[is.na(architecture_df$cor_out)] <- 0
+    architecture_df$cor_in <- pmax(0, architecture_df$cor_in)
+    architecture_df$cor_out <- pmax(0, architecture_df$cor_out)
+
     best_cor_in <- max(architecture_df$cor_in)
     best_cor_out <- max(architecture_df$cor_out)
 
     architecture_df$keep <- (
-      architecture_df$cor_in > best_cor_in - competitiveness_param &
-      architecture_df$cor_in > 0 &
-      architecture_df$cor_out > best_cor_out - competitiveness_param &
-      architecture_df$cor_out > 0
+      architecture_df$cor_in >= best_cor_in - competitiveness_param &
+      architecture_df$cor_in >= 0 &
+      architecture_df$cor_out >= best_cor_out - competitiveness_param &
+      architecture_df$cor_out >= 0
     )
 
     # Record architecture history
@@ -486,6 +548,7 @@ aps <- function(obj_function,
     # This uses exact variance when available, approximation only when needed.
     rho_star_iter <- NA
     rho_tilde_iter <- NA
+    rho_tilde_in_iter <- NA
     sigma2_iter <- NA
 
     if (nrow(x_train) >= 20 && requireNamespace("FNN", quietly = TRUE)) {
@@ -534,46 +597,65 @@ aps <- function(obj_function,
           rho_star_iter <- sqrt(tau2_iter) / sqrt(tau2_iter + sigma2_iter)
           rho_tilde_iter <- if (rho_star_iter > 0) best_cor_out / rho_star_iter else NA
           rho_tilde_iter <- min(1, rho_tilde_iter)  # Cap at 1
+          rho_tilde_in_iter <- if (rho_star_iter > 0) best_cor_in / rho_star_iter else NA
+          rho_tilde_in_iter <- min(1, rho_tilde_in_iter)  # Cap at 1
         }
+      }
+    }
+
+    # Tier promotion check: promote if signal remains and tier hasn't maxed
+    tier_iter_count <- tier_iter_count + 1
+    if (!is.na(rho_tilde_iter) &&
+        rho_tilde_iter < rho_tilde_threshold &&
+        current_tier < max_tier &&
+        tier_iter_count >= 2) {
+      old_tier <- current_tier
+      current_tier <- current_tier + 1
+      tier_iter_count <- 0
+      if (verbose) {
+        message(sprintf(
+          "Tier promoted: %d -> %d (rho_tilde=%.3f < %.3f)",
+          old_tier, current_tier,
+          rho_tilde_iter, rho_tilde_threshold
+        ))
       }
     }
 
     if (verbose) {
       cat("\r", strrep(" ", 60), "\r", sep = "")  # Clear progress line
-      message(sprintf("Models kept: %d, replaced: %d", n_models - n_bad_models, n_bad_models))
+      message(sprintf("Models kept: %d, replaced: %d",
+                      n_models - n_bad_models, n_bad_models))
       # Include rho* (noise ceiling) alongside correlations
       if (!is.na(rho_star_iter)) {
-        message(sprintf("Correlations: in=%.3f, out=%.3f, rho*=%.3f, rho~/rho*=%.3f",
-                        best_cor_in, best_cor_out, rho_star_iter, rho_tilde_iter))
+        message(sprintf(
+          "Correlations: in=%.3f, out=%.3f, rho*=%.3f, rho~/rho*=%.3f (in=%.3f)",
+          best_cor_in, best_cor_out, rho_star_iter,
+          rho_tilde_iter, rho_tilde_in_iter))
       } else {
-        message(sprintf("Best in-sample cor: %.3f, Best out-of-sample cor: %.3f",
-                        best_cor_in, best_cor_out))
+        message(sprintf(
+          "Best in-sample cor: %.3f, Best out-of-sample cor: %.3f",
+          best_cor_in, best_cor_out))
       }
       # Show both iteration mean and exploit mean (exploit mean drives early stopping)
-      message(sprintf("Iteration y: mean=%.4f, min=%.4f, exploit_mean=%.4f",
-                      mean(new_y), min(new_y), current_exploit_mean))
+      message(sprintf(
+        "Iteration y: mean=%.4f, min=%.4f, exploit_mean=%.4f",
+        mean(new_y), min(new_y), current_exploit_mean))
     }
 
     # Update architecture for next iteration
-    new_architecture_df <- architecture_df[architecture_df$keep,
-                                           c("depth", "width", "reg", "dropout", "activation")]
+    kept_cols <- c("depth", "width", "reg", "dropout", "activation")
+    kept_df <- architecture_df[architecture_df$keep, kept_cols]
+    bad_df <- architecture_df[!architecture_df$keep, kept_cols]
 
     if (n_bad_models > 0) {
-      if (use_genetic && nrow(new_architecture_df) > 0) {
-        # Mutate from good parents
-        new_architecture_df <- rbind(
-          new_architecture_df,
-          mutate_architectures(new_architecture_df, n_bad_models, config = architecture_config)
-        )
-      } else {
-        # Pure random generation
-        new_architecture_df <- rbind(
-          new_architecture_df,
-          generate_architectures(n_bad_models, config = architecture_config)
-        )
-      }
+      replacement_df <- smart_replacement(
+        bad_df, kept_df, architecture_history,
+        tier = current_tier, config = architecture_config
+      )
+      architecture_df <- rbind(kept_df, replacement_df)
+    } else {
+      architecture_df <- kept_df
     }
-    architecture_df <- new_architecture_df
 
     # Save checkpoint if requested
     if (!is.null(checkpoint_file)) {
@@ -589,10 +671,11 @@ aps <- function(obj_function,
         iteration = iteration_tracker,
         n_iter = n_iter,
         n_obs = n_obs,
-        exploit_ratio = exploit_ratio,
+        epsilon = epsilon,
         reduction = reduction,
         output_names = output_names,
-        invalid_idx = invalid_idx
+        invalid_idx = invalid_idx,
+        current_tier = current_tier
       )
       class(checkpoint_result) <- "aps_result"
       saveRDS(checkpoint_result, file = checkpoint_file)
@@ -622,22 +705,26 @@ aps <- function(obj_function,
       }
 
       # Check stopping condition
+      n_good_models_iter <- n_models - n_bad_models
       if (!is.na(rho_tilde_iter) &&
           rho_tilde_iter >= rho_tilde_threshold &&
-          stable_iter_count >= min_stable_iters) {
+          stable_iter_count >= min_stable_iters &&
+          n_good_models_iter >= min_good_models) {
         if (verbose) {
           message(sprintf("\n*** EARLY STOP at iteration %d ***", i))
           message(sprintf("rho_tilde = %.3f (>= %.3f threshold)", rho_tilde_iter, rho_tilde_threshold))
           message(sprintf("Exploit mean stable for %d iterations (current: %.4f, prev: %.4f)",
                           stable_iter_count, current_exploit_mean, prev_exploit_mean))
+          message(sprintf("Good models: %d (>= %d required)", n_good_models_iter, min_good_models))
         }
         stopped_early <- TRUE
         break
       }
 
       if (verbose && !is.na(rho_tilde_iter)) {
-        message(sprintf("Early stop check: rho_tilde=%.3f, stable_iters=%d, exploit_mean=%.4f",
-                        rho_tilde_iter, stable_iter_count, current_exploit_mean))
+        message(sprintf("Early stop check: rho_tilde=%.3f, stable_iters=%d, exploit_mean=%.4f, good_models=%d/%d",
+                        rho_tilde_iter, stable_iter_count, current_exploit_mean,
+                        n_good_models_iter, min_good_models))
       }
     }
   }
@@ -656,16 +743,161 @@ aps <- function(obj_function,
     iteration = iteration_tracker,
     n_iter = n_iter,
     n_obs = n_obs,
-    exploit_ratio = exploit_ratio,
+    epsilon = epsilon,
     reduction = reduction,
     output_names = output_names,
     invalid_idx = invalid_idx,
     stopped_early = stopped_early,
-    final_iteration = max(iteration_tracker)
+    final_iteration = max(iteration_tracker),
+    current_tier = current_tier
   )
 
   class(result) <- "aps_result"
   result
+}
+
+
+#' Smart Architecture Replacement
+#'
+#' Generates replacement architectures for bad models using the incremental
+#' evolution constraint: depth and width can each increase by at most one step,
+#' and cannot both increase simultaneously. Avoids duplicates of kept models
+#' and downweights recently-failed architecture triples.
+#'
+#' @param bad_df Data frame of architectures being replaced
+#' @param kept_df Data frame of kept (good) architectures
+#' @param history_df Full architecture history data frame
+#' @param tier Current tier level
+#' @param config Architecture config list
+#'
+#' @return Data frame of replacement architectures
+#' @keywords internal
+smart_replacement <- function(bad_df, kept_df, history_df,
+                              tier, config = NULL) {
+  bounds <- get_tier_bounds(tier, config)
+
+  defaults <- list(
+    depth = 1:5,
+    width = c(32, 64, 128, 256, 512),
+    reg = seq(0, 0.0005, by = 0.0001),
+    dropout = seq(0, 0.5, by = 0.1),
+    activation = c("relu", "sigmoid", "tanh")
+  )
+  if (!is.null(config)) {
+    for (key in names(config)) {
+      if (key %in% names(defaults)) defaults[[key]] <- config[[key]]
+    }
+  }
+
+  width_options <- sort(unique(defaults$width))
+  activations <- defaults$activation
+  n_bad <- nrow(bad_df)
+
+  replacements <- vector("list", n_bad)
+
+  # Kept triples for dedup
+  kept_triples <- paste(
+    kept_df$depth, kept_df$width, kept_df$activation,
+    sep = "_"
+  )
+  selected_triples <- character(0)
+
+  # Recent failures for downweighting
+  recent_failures <- character(0)
+  if (!is.null(history_df) && nrow(history_df) > 0) {
+    max_iter <- max(history_df$iteration)
+    recent <- history_df[
+      history_df$iteration >= max_iter - 1 & !history_df$keep, ,
+      drop = FALSE
+    ]
+    if (nrow(recent) > 0) {
+      recent_failures <- paste(
+        recent$depth, recent$width, recent$activation,
+        sep = "_"
+      )
+    }
+  }
+
+  for (i in 1:n_bad) {
+    d_old <- bad_df$depth[i]
+    w_old <- bad_df$width[i]
+
+    # Candidate depths: any up to min(d_old + 1, tier max)
+    max_d <- min(d_old + 1, bounds$max_depth)
+    cand_depths <- defaults$depth[
+      defaults$depth >= min(defaults$depth) &
+      defaults$depth <= max_d
+    ]
+    if (length(cand_depths) == 0) cand_depths <- d_old
+
+    # Candidate widths: any up to min(next_step(w_old), tier max)
+    w_next <- next_width_step(w_old, config)
+    max_w <- min(w_next, bounds$max_width)
+    cand_widths <- width_options[width_options <= max_w]
+    if (length(cand_widths) == 0) cand_widths <- w_old
+
+    # Build all (depth, width) combinations
+    dw_grid <- expand.grid(
+      depth = cand_depths,
+      width = cand_widths,
+      stringsAsFactors = FALSE
+    )
+
+    # Enforce "can't increase both" constraint
+    dw_grid <- dw_grid[
+      !(dw_grid$depth > d_old & dw_grid$width > w_old), ,
+      drop = FALSE
+    ]
+    if (nrow(dw_grid) == 0) {
+      dw_grid <- data.frame(depth = d_old, width = w_old)
+    }
+
+    # Cross with activations
+    candidates <- merge(
+      dw_grid,
+      data.frame(activation = activations,
+                 stringsAsFactors = FALSE)
+    )
+    cand_keys <- paste(
+      candidates$depth, candidates$width,
+      candidates$activation, sep = "_"
+    )
+
+    # Remove triples already in use
+    in_use <- c(kept_triples, selected_triples)
+    available <- !(cand_keys %in% in_use)
+    if (sum(available) == 0) available <- rep(TRUE, length(cand_keys))
+    candidates <- candidates[available, , drop = FALSE]
+    cand_keys <- cand_keys[available]
+
+    # Downweight recent failures
+    weights <- rep(1, nrow(candidates))
+    for (j in seq_along(cand_keys)) {
+      n_fails <- sum(recent_failures == cand_keys[j])
+      if (n_fails > 0) weights[j] <- weights[j] * (0.5^n_fails)
+    }
+
+    # Sample one replacement
+    if (nrow(candidates) == 1) {
+      idx <- 1
+    } else {
+      idx <- sample(
+        nrow(candidates), 1,
+        prob = weights / sum(weights)
+      )
+    }
+    chosen <- candidates[idx, ]
+
+    # Reg and dropout sampled freely
+    chosen$reg <- safe_sample(defaults$reg, 1)
+    chosen$dropout <- safe_sample(defaults$dropout, 1)
+
+    replacements[[i]] <- chosen
+    selected_triples <- c(selected_triples, cand_keys[idx])
+  }
+
+  result <- do.call(rbind, replacements)
+  result[, c("depth", "width", "reg", "dropout", "activation")]
 }
 
 
@@ -716,14 +948,19 @@ evaluate_objective <- function(obj_function, x, num_cores = 1,
       cat("\r")  # Return to start for next output
     }
   } else {
+    if (verbose) {
+      message(sprintf("%s %d points on %d cores...", prefix, n, num_cores))
+    }
     raw_results <- parallel::mclapply(
       1:n,
       function(i) {
         set.seed(seeds[i])
         obj_function(x[i, ])
       },
-      mc.cores = num_cores
+      mc.cores = num_cores,
+      mc.preschedule = FALSE
     )
+    if (verbose) message("Done.")
   }
 
   # Detect scalar vs vector mode from first result
