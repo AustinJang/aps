@@ -65,7 +65,7 @@ values likely to produce poor method performance.</p>
 <span>  y_init <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  y_raw_init <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  num_cores <span class="op">=</span> <span class="fl">1</span>,</span>
-<span>  exploit_ratio <span class="op">=</span> <span class="fl">0.5</span>,</span>
+<span>  epsilon <span class="op">=</span> <span class="fl">0.5</span>,</span>
 <span>  competitiveness_param <span class="op">=</span> <span class="fl">0.2</span>,</span>
 <span>  tolerance <span class="op">=</span> <span class="fl">0.01</span>,</span>
 <span>  verbose <span class="op">=</span> <span class="cn">TRUE</span>,</span>
@@ -136,8 +136,8 @@ If provided with a <code>reduction</code>, <code>y_init</code> is computed autom
 <dd><p>Number of cores for parallel evaluation (default 1)</p></dd>
 
 
-<dt id="arg-exploit-ratio">exploit_ratio<a class="anchor" aria-label="anchor" href="#arg-exploit-ratio"></a></dt>
-<dd><p>Fraction of candidates for exploitation vs exploration (default 0.5)</p></dd>
+<dt id="arg-epsilon">epsilon<a class="anchor" aria-label="anchor" href="#arg-epsilon"></a></dt>
+<dd><p>Exploration fraction: proportion of each batch devoted to exploration vs exploitation (default 0.5)</p></dd>
 
 
 <dt id="arg-competitiveness-param">competitiveness_param<a class="anchor" aria-label="anchor" href="#arg-competitiveness-param"></a></dt>

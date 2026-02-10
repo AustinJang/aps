@@ -10,7 +10,7 @@ First release of the Adversarial Parameter Selection package.
 
 - Neural network ensemble surrogates for efficient parameter space
   exploration
-- Exploitation/exploration balance via `exploit_ratio`
+- Exploitation/exploration balance via `epsilon`
 - Competitive model selection: underperforming architectures replaced
   each iteration
 - Configurable network architectures via `architecture_config`

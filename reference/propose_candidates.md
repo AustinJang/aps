@@ -13,7 +13,7 @@ propose_candidates(
   x_min,
   x_max,
   n_candidates,
-  exploit_ratio = 0.5,
+  epsilon = 0.5,
   n_starting = 20,
   tolerance = 0.01
 )
@@ -45,9 +45,10 @@ propose_candidates(
 
   Number of candidate points to propose
 
-- exploit_ratio:
+- epsilon:
 
-  Fraction of candidates for exploitation vs exploration (default 0.5)
+  Exploration fraction: proportion of candidates devoted to exploration
+  vs exploitation (default 0.5)
 
 - n_starting:
 

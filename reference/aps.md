@@ -21,7 +21,7 @@ aps(
   y_init = NULL,
   y_raw_init = NULL,
   num_cores = 1,
-  exploit_ratio = 0.5,
+  epsilon = 0.5,
   competitiveness_param = 0.2,
   tolerance = 0.01,
   verbose = TRUE,
@@ -94,9 +94,10 @@ aps(
 
   Number of cores for parallel evaluation (default 1)
 
-- exploit_ratio:
+- epsilon:
 
-  Fraction of candidates for exploitation vs exploration (default 0.5)
+  Exploration fraction: proportion of each batch devoted to exploration
+  vs exploitation (default 0.5)
 
 - competitiveness_param:
 

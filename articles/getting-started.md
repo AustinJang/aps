@@ -78,14 +78,14 @@ tapply(result$y, result$iteration, min)
 
 ## Key Parameters
 
-| Parameter        | Description                        | Default  |
-|------------------|------------------------------------|----------|
-| `n_params`       | Dimensions of parameter space      | Required |
-| `x_min`, `x_max` | Bounds (scalar or vector)          | 0, 1     |
-| `n_iter`         | Number of optimization iterations  | 10       |
-| `n_obs`          | Evaluations per iteration          | 500      |
-| `exploit_ratio`  | Balance exploit (1) vs explore (0) | 0.5      |
-| `early_stop`     | Enable convergence-based stopping  | FALSE    |
+| Parameter        | Description                                     | Default  |
+|------------------|-------------------------------------------------|----------|
+| `n_params`       | Dimensions of parameter space                   | Required |
+| `x_min`, `x_max` | Bounds (scalar or vector)                       | 0, 1     |
+| `n_iter`         | Number of optimization iterations               | 10       |
+| `n_obs`          | Evaluations per iteration                       | 500      |
+| `epsilon`        | Exploration fraction (0 = exploit, 1 = explore) | 0.5      |
+| `early_stop`     | Enable convergence-based stopping               | FALSE    |
 
 ## Diagnostic Plots
 
